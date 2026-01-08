@@ -246,10 +246,10 @@ impl SchemaInference {
         }
 
         // Check for numeric promotion
-        let has_int = types.iter().any(|t| *t == IcebergType::Int);
-        let has_long = types.iter().any(|t| *t == IcebergType::Long);
-        let has_float = types.iter().any(|t| *t == IcebergType::Float);
-        let has_double = types.iter().any(|t| *t == IcebergType::Double);
+        let has_int = types.contains(&IcebergType::Int);
+        let has_long = types.contains(&IcebergType::Long);
+        let has_float = types.contains(&IcebergType::Float);
+        let has_double = types.contains(&IcebergType::Double);
 
         if has_double || (has_float && (has_int || has_long)) {
             return IcebergType::Double;
@@ -399,7 +399,7 @@ impl SchemaEvolution {
                 name: field.name.clone(),
                 field_type: field.field_type.to_iceberg_string().to_string(),
                 required: false, // Always make new columns nullable for safety
-                doc: Some(format!("Auto-added field from schema evolution")),
+                doc: Some("Auto-added field from schema evolution".to_string()),
             })
             .collect()
     }

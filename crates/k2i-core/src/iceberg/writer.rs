@@ -21,7 +21,6 @@ use crate::config::{IcebergConfig, ParquetCompression};
 use crate::iceberg::factory::{CatalogOperations, DataFileInfo, SnapshotCommit};
 use crate::iceberg::metadata_cache::SharedMetadataCache;
 use crate::iceberg::table_manager::TableManager;
-use crate::iceberg::transaction_coordinator::CommitResult;
 use crate::iceberg::transaction_coordinator::TransactionCoordinator;
 use crate::txlog::{TransactionEntry, TransactionLog};
 use crate::{Error, IcebergError, Result};
@@ -38,7 +37,7 @@ use std::io::Cursor;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 use uuid::Uuid;
 
 /// Statistics from a write operation.
@@ -84,6 +83,7 @@ pub struct IcebergWriter {
     /// Optional catalog operations for real catalog integration
     catalog: Option<Arc<dyn CatalogOperations>>,
     /// Optional table manager for table lifecycle
+    #[allow(dead_code)]
     table_manager: Option<Arc<TableManager>>,
     /// Optional transaction coordinator for atomic commits
     transaction_coordinator: Option<Arc<TransactionCoordinator>>,
@@ -553,7 +553,7 @@ impl IcebergWriter {
         // Get current snapshot ID for CAS
         let current_snapshot_id = if let Some(ref cache) = self.metadata_cache {
             // Try cache first
-            cache.get_snapshot_id().or_else(|| {
+            cache.get_snapshot_id().or({
                 // Cache miss - we'll fetch from catalog
                 None
             })
@@ -572,7 +572,7 @@ impl IcebergWriter {
         use chrono::{DateTime, Utc};
 
         let event_time = DateTime::from_timestamp_millis(partition_info.event_timestamp_ms)
-            .unwrap_or_else(|| Utc::now());
+            .unwrap_or_else(Utc::now);
 
         let mut partition_values = HashMap::new();
 
@@ -672,7 +672,7 @@ impl IcebergWriter {
 
         // Convert timestamp to date/hour based on partition strategy
         let event_time = DateTime::from_timestamp_millis(partition_info.event_timestamp_ms)
-            .unwrap_or_else(|| Utc::now());
+            .unwrap_or_else(Utc::now);
 
         // Generate time partition based on strategy
         let time_partition = match self.config.table_management.partition_strategy {
@@ -712,7 +712,7 @@ impl IcebergWriter {
         let kafka_partition = batch
             .column_by_name("partition")
             .and_then(|c| c.as_any().downcast_ref::<Int32Array>())
-            .map(|arr| if arr.len() > 0 { arr.value(0) } else { 0 })
+            .map(|arr| if !arr.is_empty() { arr.value(0) } else { 0 })
             .unwrap_or(0);
 
         // Extract offset column for min/max
@@ -720,7 +720,7 @@ impl IcebergWriter {
             .column_by_name("offset")
             .and_then(|c| c.as_any().downcast_ref::<Int64Array>())
             .map(|arr| {
-                if arr.len() > 0 {
+                if !arr.is_empty() {
                     let min = arr.value(0);
                     let max = arr.value(arr.len() - 1);
                     (min, max)
@@ -735,7 +735,7 @@ impl IcebergWriter {
             .column_by_name("timestamp")
             .and_then(|c| c.as_any().downcast_ref::<Int64Array>())
             .map(|arr| {
-                if arr.len() > 0 {
+                if !arr.is_empty() {
                     arr.value(0)
                 } else {
                     chrono::Utc::now().timestamp_millis()

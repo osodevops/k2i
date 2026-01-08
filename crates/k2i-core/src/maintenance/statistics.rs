@@ -248,10 +248,7 @@ impl StatisticsTask {
                 let col_path = col_meta.column_path().string();
 
                 let col_statistics = col_meta.statistics();
-                let null_count = col_statistics
-                    .as_ref()
-                    .and_then(|s| s.null_count_opt())
-                    .map(|c| c as u64);
+                let null_count = col_statistics.as_ref().and_then(|s| s.null_count_opt());
                 let min_value = col_statistics
                     .as_ref()
                     .and_then(|s| s.min_bytes_opt())
@@ -286,6 +283,7 @@ impl StatisticsTask {
 
 /// Statistics for a single file.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct FileStatistics {
     /// File path
     pub file_path: String,

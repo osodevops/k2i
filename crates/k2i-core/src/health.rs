@@ -31,6 +31,7 @@ pub enum HealthStatus {
 /// Health check manager for tracking component health.
 pub struct HealthCheck {
     components: RwLock<HashMap<String, ComponentStatus>>,
+    #[allow(dead_code)]
     started_at: Option<Instant>,
     job_running: RwLock<bool>,
 }

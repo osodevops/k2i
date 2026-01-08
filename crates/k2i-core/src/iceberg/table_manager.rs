@@ -8,9 +8,7 @@
 
 use crate::config::{IcebergConfig, SchemaMismatchAction, TableManagementConfig};
 use crate::iceberg::factory::{CatalogOperations, SchemaFieldInfo, TableInfo, TableSchema};
-use crate::iceberg::metadata_cache::{
-    CachedField, CachedPartitionField, CachedPartitionSpec, CachedSchema, MetadataCache,
-};
+use crate::iceberg::metadata_cache::{CachedField, CachedSchema, MetadataCache};
 use crate::iceberg::schema_evolution::{
     IcebergType, InferredField, SchemaEvolution, SchemaEvolutionConfig, SchemaEvolutionPlan,
     SchemaEvolver,
@@ -349,7 +347,7 @@ impl TableManager {
         }
 
         // Fall back to catalog
-        let table_info = self.load_table().await?;
+        let _table_info = self.load_table().await?;
 
         // Cache is already updated by load_table
         self.cache.get_schema().ok_or_else(|| {
@@ -589,10 +587,8 @@ impl Default for TableManagerBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{CatalogType, PartitionStrategy};
-    use crate::iceberg::factory::{
-        CatalogHealth, DataFileInfo, SnapshotCommit, SnapshotCommitResult,
-    };
+    use crate::config::CatalogType;
+    use crate::iceberg::factory::{CatalogHealth, SnapshotCommit, SnapshotCommitResult};
     use async_trait::async_trait;
     use std::collections::HashMap;
 

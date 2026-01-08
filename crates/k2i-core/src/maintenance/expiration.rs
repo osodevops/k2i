@@ -18,7 +18,7 @@ use crate::config::IcebergConfig;
 use crate::iceberg::CatalogOperations;
 use crate::txlog::{MaintenanceOp, TransactionEntry, TransactionLog};
 use crate::Result;
-use chrono::{DateTime, Duration, Utc};
+use chrono::{Duration, Utc};
 use futures::TryStreamExt;
 use object_store::ObjectStore;
 use std::sync::Arc;
@@ -283,7 +283,7 @@ impl ExpirationTask {
             // Parse snapshot files: snap-{snapshot_id}-{uuid}.avro
             if path.contains("/snap-") && path.ends_with(".avro") {
                 if let Some(snapshot_id) = Self::extract_snapshot_id_from_path(&path) {
-                    let timestamp = DateTime::<Utc>::from(meta.last_modified);
+                    let timestamp = meta.last_modified;
 
                     snapshots.push(SnapshotInfo {
                         snapshot_id,
@@ -381,7 +381,7 @@ impl ExpirationTask {
             .any(|s| s.snapshot_id == current_snapshot_id);
 
         // Check that we have at least one snapshot remaining
-        let expires_all = candidates.len() > 0; // This is a placeholder
+        let _expires_all = !candidates.is_empty(); // This is a placeholder
 
         ExpirationValidation {
             is_safe: !includes_current,

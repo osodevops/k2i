@@ -17,7 +17,7 @@ use crate::config::IcebergConfig;
 use crate::iceberg::CatalogOperations;
 use crate::txlog::{MaintenanceOp, TransactionEntry, TransactionLog};
 use crate::Result;
-use chrono::{DateTime, Duration, Utc};
+use chrono::{Duration, Utc};
 use futures::TryStreamExt;
 use object_store::ObjectStore;
 use std::collections::HashSet;
@@ -283,7 +283,7 @@ impl OrphanCleanupTask {
             .map_err(|e| crate::Error::Storage(format!("Failed to list files: {}", e)))?
         {
             let path = meta.location.to_string();
-            let modified_at = DateTime::<Utc>::from(meta.last_modified);
+            let modified_at = meta.last_modified;
 
             // Only consider files older than the cutoff for orphan detection
             // Recent files might be in-flight writes
@@ -292,7 +292,7 @@ impl OrphanCleanupTask {
                     path,
                     size_bytes: meta.size as u64,
                     modified_at,
-                    file_type: Self::classify_file(&meta.location.to_string()),
+                    file_type: Self::classify_file(meta.location.as_ref()),
                 });
             }
         }
@@ -583,7 +583,7 @@ mod tests {
         let task = OrphanCleanupTask::new(3, None);
         let now = Utc::now();
 
-        let files = vec![OrphanCandidate {
+        let files = [OrphanCandidate {
             path: "/data/old.parquet".into(),
             size_bytes: 1024,
             modified_at: now - Duration::days(5),
@@ -602,7 +602,7 @@ mod tests {
         let task = OrphanCleanupTask::new(0, None); // 0 retention is risky
         let now = Utc::now();
 
-        let files = vec![OrphanCandidate {
+        let files = [OrphanCandidate {
             path: "/data/recent.parquet".into(),
             size_bytes: 1024,
             modified_at: now - Duration::minutes(30), // Very recent

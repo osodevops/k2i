@@ -224,7 +224,7 @@ impl TransactionLog {
         })?;
 
         // Get underlying file and sync to disk
-        if let Some(file) = current_file.get_ref().try_clone().ok() {
+        if let Ok(file) = current_file.get_ref().try_clone() {
             file.sync_all().map_err(|e| {
                 Error::TransactionLog(TransactionLogError::WriteFailed(format!(
                     "Failed to fsync before rotation: {}",
@@ -395,7 +395,7 @@ impl TransactionLog {
             )))
         })?;
 
-        if let Some(inner) = file.get_ref().try_clone().ok() {
+        if let Ok(inner) = file.get_ref().try_clone() {
             inner.sync_all().map_err(|e| {
                 Error::TransactionLog(TransactionLogError::WriteFailed(format!(
                     "Failed to sync: {}",

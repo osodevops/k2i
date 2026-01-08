@@ -132,6 +132,7 @@ struct ColumnBuilders {
     memory_bytes: usize,
 }
 
+#[allow(dead_code)]
 struct BufferStats {
     total_records: AtomicU64,
     total_bytes: AtomicUsize,

@@ -7,16 +7,14 @@
 //! - Integration with transaction log for durability
 
 use crate::config::CatalogManagerConfig;
-use crate::iceberg::factory::{
-    CatalogOperations, DataFileInfo, SnapshotCommit, SnapshotCommitResult,
-};
+use crate::iceberg::factory::{CatalogOperations, DataFileInfo, SnapshotCommit};
 use crate::iceberg::metadata_cache::MetadataCache;
 use crate::txlog::{TransactionEntry, TransactionLog};
 use crate::{Error, IcebergError, Result};
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, info, warn};
@@ -632,9 +630,9 @@ impl Default for TransactionCoordinatorBuilder {
 mod tests {
     use super::*;
     use crate::config::CatalogType;
-    use crate::iceberg::factory::{CatalogHealth, SchemaFieldInfo, TableInfo, TableSchema};
+    use crate::iceberg::factory::{CatalogHealth, SnapshotCommitResult, TableInfo, TableSchema};
     use async_trait::async_trait;
-    use std::sync::atomic::AtomicI64;
+    use std::sync::atomic::{AtomicI64, AtomicU32};
 
     /// Mock catalog that simulates CAS behavior.
     struct MockCatalogWithCas {
@@ -978,7 +976,7 @@ mod tests {
         let offsets = Some(("topic".to_string(), 0, 100, 200));
 
         // Commit
-        let result = coordinator.commit_snapshot(files, offsets).await.unwrap();
+        let _result = coordinator.commit_snapshot(files, offsets).await.unwrap();
 
         // Check various ranges
         assert!(coordinator

@@ -21,7 +21,7 @@ use crate::{Error, IcebergError, Result};
 use arrow::compute::concat_batches;
 use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use futures::TryStreamExt;
 use object_store::{path::Path as ObjectPath, ObjectStore};
 use parquet::arrow::{ArrowWriter, ParquetRecordBatchStreamBuilder};
@@ -286,7 +286,7 @@ impl CompactionTask {
     async fn compact_group(
         &self,
         group: &[&FileInfo],
-        group_idx: usize,
+        _group_idx: usize,
         store: &Arc<dyn ObjectStore>,
         config: &IcebergConfig,
     ) -> Result<(DataFileInfo, u64, u64)> {
@@ -432,7 +432,7 @@ impl CompactionTask {
                     path,
                     size_bytes: meta.size as u64,
                     row_count: 0, // Will be updated when reading the file
-                    created_at: DateTime::<Utc>::from(meta.last_modified),
+                    created_at: meta.last_modified,
                 });
             }
         }

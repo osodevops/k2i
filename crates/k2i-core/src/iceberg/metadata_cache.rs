@@ -6,7 +6,6 @@
 //! - Partition spec: 5 minutes TTL (rarely changes)
 //! - Manifest entries: 1 minute TTL (for compaction decisions)
 
-use crate::Result;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};

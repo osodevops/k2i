@@ -8,10 +8,10 @@
 //! and reference (branch/tag) support.
 
 use crate::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
-use crate::config::{CatalogType, CredentialType, IcebergConfig, NessieCatalogConfig};
+use crate::config::{CatalogType, CredentialType, IcebergConfig};
 use crate::iceberg::factory::{
-    CatalogFactory, CatalogHealth, CatalogOperations, DataFileInfo, SchemaFieldInfo,
-    SnapshotCommit, SnapshotCommitResult, TableInfo, TableSchema,
+    CatalogFactory, CatalogHealth, CatalogOperations, SchemaFieldInfo, SnapshotCommit,
+    SnapshotCommitResult, TableInfo, TableSchema,
 };
 use crate::iceberg::rest_api;
 use crate::{Error, IcebergError, Result};
@@ -93,11 +93,11 @@ struct CachedToken {
 impl NessieCatalogClient {
     /// Create a new Nessie catalog client.
     pub async fn new(config: &IcebergConfig, rest_uri: String) -> Result<Self> {
-        let timeout = Duration::from_secs(config.rest.request_timeout_seconds.unwrap_or(30) as u64);
+        let timeout = Duration::from_secs(config.rest.request_timeout_seconds.unwrap_or(30));
 
         let http_client = Client::builder()
             .timeout(timeout)
-            .pool_max_idle_per_host(config.catalog_manager.connection_pool_size as usize)
+            .pool_max_idle_per_host(config.catalog_manager.connection_pool_size)
             .build()
             .map_err(|e| Error::Config(format!("Failed to create HTTP client: {}", e)))?;
 
@@ -701,7 +701,7 @@ impl CatalogOperations for NessieCatalogClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ParquetCompression;
+    use crate::config::{NessieCatalogConfig, ParquetCompression};
 
     fn create_test_config() -> IcebergConfig {
         IcebergConfig {

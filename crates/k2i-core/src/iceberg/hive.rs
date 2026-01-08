@@ -299,11 +299,10 @@ impl HiveCatalogClient {
                 if hive_type.starts_with("array<") {
                     let inner = &hive_type[6..hive_type.len() - 1];
                     format!("list<{}>", self.hive_type_to_iceberg_type(inner))
-                } else if hive_type.starts_with("map<") {
-                    hive_type.to_string()
-                } else if hive_type.starts_with("struct<") {
-                    hive_type.to_string()
-                } else if hive_type.starts_with("decimal(") {
+                } else if hive_type.starts_with("map<")
+                    || hive_type.starts_with("struct<")
+                    || hive_type.starts_with("decimal(")
+                {
                     hive_type.to_string()
                 } else {
                     "string".to_string()

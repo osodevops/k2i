@@ -163,13 +163,13 @@ mod buffer_integration {
         let buffer = HotBuffer::new(config);
 
         // Add messages with different keys
-        for i in 0..100 {
+        for i in 0i64..100 {
             let msg = KafkaMessage {
                 key: Some(format!("user-{}", i % 10).into_bytes()),
                 value: Some(format!(r#"{{"count": {} }}"#, i).into_bytes()),
                 topic: "events".to_string(),
                 partition: (i % 3) as i32,
-                offset: i as i64,
+                offset: i,
                 timestamp: chrono::Utc::now().timestamp_millis(),
                 headers: vec![],
             };
@@ -180,7 +180,7 @@ mod buffer_integration {
         let result = buffer.query_by_key(b"user-0");
         assert!(!result.is_empty());
         // Note: query_by_key returns the last record with that key via the index
-        assert!(result.len() >= 1);
+        assert!(!result.is_empty());
 
         // Query recent records (last 1 second)
         let result = buffer.query_recent(Duration::from_secs(1));
@@ -207,7 +207,7 @@ mod txlog_integration {
         let txlog = TransactionLog::open(config).expect("Failed to open transaction log");
 
         // Simulate ingestion workflow
-        for batch in 0..5 {
+        for batch in 0i64..5 {
             let start_offset = batch * 100;
             let end_offset = start_offset + 99;
             let batch_id = format!("batch-{}", batch);
@@ -250,7 +250,7 @@ mod txlog_integration {
             txlog
                 .append(TransactionEntry::IcebergSnapshot {
                     batch_id: batch_id.clone(),
-                    snapshot_id: batch as i64 + 1000,
+                    snapshot_id: batch + 1000,
                     manifest_list_path: format!("s3://bucket/metadata/snap-{}.avro", batch),
                     row_count_total: ((batch + 1) * 100) as u64,
                     timestamp: chrono::Utc::now(),
@@ -262,7 +262,7 @@ mod txlog_integration {
                 .append(TransactionEntry::FlushComplete {
                     batch_id,
                     kafka_offset: end_offset,
-                    iceberg_snapshot_id: batch as i64 + 1000,
+                    iceberg_snapshot_id: batch + 1000,
                     duration_ms: 500,
                     timestamp: chrono::Utc::now(),
                 })

@@ -276,6 +276,7 @@ impl CatalogFactory for RestCatalogFactory {
 
 /// REST catalog client configuration.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct RestClientConfig {
     /// REST API base URI
     pub base_uri: String,
@@ -325,11 +326,11 @@ struct CachedToken {
 impl RestCatalogClient {
     /// Create a new REST catalog client.
     pub async fn new(config: &IcebergConfig, rest_uri: String) -> Result<Self> {
-        let timeout = Duration::from_secs(config.rest.request_timeout_seconds.unwrap_or(30) as u64);
+        let timeout = Duration::from_secs(config.rest.request_timeout_seconds.unwrap_or(30));
 
         let http_client = Client::builder()
             .timeout(timeout)
-            .pool_max_idle_per_host(config.catalog_manager.connection_pool_size as usize)
+            .pool_max_idle_per_host(config.catalog_manager.connection_pool_size)
             .build()
             .map_err(|e| Error::Config(format!("Failed to create HTTP client: {}", e)))?;
 
@@ -412,7 +413,7 @@ impl RestCatalogClient {
             .as_ref()
             .ok_or_else(|| Error::Config("OAuth2 requires client_secret".into()))?;
 
-        let request = rest_api::OAuthTokenRequest {
+        let _request = rest_api::OAuthTokenRequest {
             grant_type: "client_credentials".to_string(),
             client_id: Some(client_id.clone()),
             client_secret: Some(client_secret.clone()),

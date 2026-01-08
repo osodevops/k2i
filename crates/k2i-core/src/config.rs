@@ -333,7 +333,7 @@ impl Default for RestCatalogConfig {
 }
 
 /// AWS Glue catalog advanced configuration.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct GlueCatalogConfig {
     /// IAM role ARN to assume
     #[serde(default)]
@@ -346,16 +346,6 @@ pub struct GlueCatalogConfig {
     /// Glue catalog ID (defaults to AWS account ID)
     #[serde(default)]
     pub catalog_id: Option<String>,
-}
-
-impl Default for GlueCatalogConfig {
-    fn default() -> Self {
-        Self {
-            role_arn: None,
-            external_id: None,
-            catalog_id: None,
-        }
-    }
 }
 
 /// Nessie catalog advanced configuration.

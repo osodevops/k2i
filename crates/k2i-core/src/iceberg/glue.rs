@@ -14,8 +14,8 @@
 use crate::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 use crate::config::{CatalogType, IcebergConfig};
 use crate::iceberg::factory::{
-    CatalogFactory, CatalogHealth, CatalogOperations, DataFileInfo, SchemaFieldInfo,
-    SnapshotCommit, SnapshotCommitResult, TableInfo, TableSchema,
+    CatalogFactory, CatalogHealth, CatalogOperations, SchemaFieldInfo, SnapshotCommit,
+    SnapshotCommitResult, TableInfo, TableSchema,
 };
 use crate::{Error, IcebergError, Result};
 use async_trait::async_trait;
@@ -201,8 +201,7 @@ impl GlueCatalogClient {
             .and_then(|s| s.parse::<i64>().ok());
 
         // Extract table properties
-        let properties: HashMap<String, String> =
-            table.parameters().map(|p| p.clone()).unwrap_or_default();
+        let properties: HashMap<String, String> = table.parameters().cloned().unwrap_or_default();
 
         Ok(TableInfo {
             namespace: namespace.to_string(),
@@ -261,9 +260,7 @@ impl GlueCatalogClient {
                 // Handle complex types or unknown types
                 if glue_type.starts_with("array<") {
                     format!("list<{}>", &glue_type[6..glue_type.len() - 1])
-                } else if glue_type.starts_with("map<") {
-                    glue_type.to_string()
-                } else if glue_type.starts_with("struct<") {
+                } else if glue_type.starts_with("map<") || glue_type.starts_with("struct<") {
                     glue_type.to_string()
                 } else {
                     "string".to_string() // Default fallback
@@ -445,7 +442,7 @@ impl CatalogOperations for GlueCatalogClient {
 
         let database_input = aws_sdk_glue::types::DatabaseInput::builder()
             .name(namespace)
-            .description(format!("Iceberg database created by k2i"))
+            .description("Iceberg database created by k2i".to_string())
             .location_uri(format!("{}/{}", self.config.warehouse_path, namespace))
             .build()
             .map_err(|e| Error::Config(format!("Failed to build database input: {}", e)))?;
