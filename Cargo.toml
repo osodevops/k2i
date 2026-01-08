@@ -1,0 +1,101 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/k2i-core",
+    "crates/k2i-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["OSO DevOps"]
+repository = "https://github.com/osodevops/k2i"
+homepage = "https://github.com/osodevops/k2i"
+rust-version = "1.75"
+
+[workspace.dependencies]
+# Kafka
+rdkafka = { version = "0.38", features = ["cmake-build", "ssl", "gssapi"] }
+
+# Arrow ecosystem
+arrow = { version = "54", features = ["csv", "json", "prettyprint"] }
+parquet = { version = "54", features = ["snap", "async"] }
+
+# Iceberg (official Apache implementation)
+iceberg = "0.7"
+iceberg-catalog-rest = "0.7"
+
+# Object storage
+object_store = { version = "0.11", features = ["aws", "azure", "gcp", "http"] }
+
+# AWS SDK (for Glue catalog)
+aws-config = { version = "1.5", features = ["behavior-version-latest"] }
+aws-sdk-glue = "1.67"
+aws-credential-types = "1.2"
+
+# Hive Metastore (Thrift client)
+hive_metastore = "0.2"
+volo-thrift = "0.10"
+ahash = "0.8"
+faststr = "0.2"
+
+# Async runtime
+tokio = { version = "1", features = ["full", "tracing"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# Concurrency
+dashmap = "6"
+parking_lot = "0.12"
+
+# Configuration & CLI
+clap = { version = "4", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+serde_json = "1"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Logging & metrics
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+prometheus = "0.13"
+
+# HTTP server (for metrics/health)
+axum = "0.7"
+tower = "0.5"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# HTTP client
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Utilities
+uuid = { version = "1", features = ["v4"] }
+bytes = "1"
+url = "2"
+urlencoding = "2"
+crc32fast = "1.4"
+
+# Testing
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["kafka", "localstack"] }
+tempfile = "3"
+tokio-test = "0.4"
+proptest = "1.5"
+criterion = "0.5"
+
+# Internal crates
+k2i-core = { path = "crates/k2i-core" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+
+[profile.dev]
+opt-level = 1

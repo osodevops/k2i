@@ -1,0 +1,29 @@
+[package]
+name = "k2i-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "CLI tool for Kafka to Iceberg streaming ingestion"
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "k2i"
+path = "src/main.rs"
+
+[dependencies]
+k2i-core.workspace = true
+tokio.workspace = true
+clap.workspace = true
+serde.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+axum.workspace = true
+tower.workspace = true
+chrono.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+prometheus.workspace = true

@@ -1,0 +1,71 @@
+# K2I Example Configuration
+# Kafka to Iceberg streaming ingestion
+
+[kafka]
+bootstrap_servers = ["localhost:9092"]
+topic = "events"
+consumer_group = "k2i-ingestion"
+batch_size = 1000
+batch_timeout_ms = 5000
+session_timeout_ms = 30000
+heartbeat_interval_ms = 3000
+max_poll_interval_ms = 300000  # 5 minutes - must exceed longest flush time
+auto_offset_reset = "earliest"
+
+[kafka.security]
+# Uncomment for SASL authentication
+# protocol = "SASL_SSL"
+# sasl_mechanism = "SCRAM-SHA-256"
+# sasl_username = "user"
+# sasl_password = "password"
+
+[iceberg]
+catalog_type = "rest"
+warehouse_path = "s3://my-bucket/warehouse"
+database_name = "raw"
+table_name = "events"
+target_file_size_mb = 512
+compression = "snappy"
+
+# REST catalog configuration
+rest_uri = "http://localhost:8181"
+
+# AWS configuration (for S3 storage)
+# aws_region = "us-east-1"
+# aws_access_key_id = "${AWS_ACCESS_KEY_ID}"
+# aws_secret_access_key = "${AWS_SECRET_ACCESS_KEY}"
+# s3_endpoint = "http://localhost:9000"  # For MinIO
+
+# Partition specification
+# [[iceberg.partition_spec]]
+# source_field = "event_timestamp"
+# transform = "day"
+
+[buffer]
+ttl_seconds = 60
+max_size_mb = 500
+flush_interval_seconds = 30
+flush_batch_size = 10000
+memory_alignment_bytes = 64
+
+[transaction_log]
+log_dir = "./transaction_logs"
+checkpoint_interval_entries = 10000
+checkpoint_interval_seconds = 300
+max_log_files = 10
+
+[maintenance]
+compaction_enabled = true
+compaction_interval_seconds = 3600
+compaction_threshold_mb = 100
+compaction_target_mb = 512
+snapshot_expiration_enabled = true
+snapshot_retention_days = 7
+orphan_cleanup_enabled = true
+orphan_retention_days = 3
+
+[monitoring]
+metrics_port = 9090
+health_port = 8080
+log_level = "info"
+log_format = "json"

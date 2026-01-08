@@ -1,0 +1,25 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+transaction_logs/
+
+# Environment
+.env
+.env.local
+
+# Test artifacts
+*.profraw
+*.profdata

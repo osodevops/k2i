@@ -1,0 +1,82 @@
+[package]
+name = "k2i-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Core engine for Kafka to Iceberg streaming ingestion"
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Kafka
+rdkafka.workspace = true
+
+# Arrow ecosystem
+arrow.workspace = true
+parquet.workspace = true
+
+# Iceberg
+iceberg.workspace = true
+iceberg-catalog-rest.workspace = true
+
+# Object storage
+object_store.workspace = true
+
+# AWS SDK (for Glue catalog)
+aws-config.workspace = true
+aws-sdk-glue.workspace = true
+aws-credential-types.workspace = true
+
+# Hive Metastore (Thrift client)
+hive_metastore.workspace = true
+volo-thrift.workspace = true
+ahash.workspace = true
+faststr.workspace = true
+
+# Async runtime
+tokio.workspace = true
+futures.workspace = true
+async-trait.workspace = true
+
+# Concurrency
+dashmap.workspace = true
+parking_lot.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+
+# Error handling
+thiserror.workspace = true
+anyhow.workspace = true
+
+# Logging & metrics
+tracing.workspace = true
+prometheus.workspace = true
+
+# HTTP server (for metrics/health)
+axum.workspace = true
+tower.workspace = true
+
+# HTTP client
+reqwest.workspace = true
+
+# Time
+chrono.workspace = true
+
+# Utilities
+uuid.workspace = true
+bytes.workspace = true
+url.workspace = true
+urlencoding.workspace = true
+crc32fast.workspace = true
+
+[dev-dependencies]
+testcontainers.workspace = true
+testcontainers-modules.workspace = true
+tempfile.workspace = true
+tokio-test.workspace = true
+proptest.workspace = true
+tracing-subscriber.workspace = true
