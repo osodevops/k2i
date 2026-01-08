@@ -99,3 +99,8 @@ opt-level = 3
 
 [profile.dev]
 opt-level = 1
+
+# Profile for cargo-dist releases
+[profile.dist]
+inherits = "release"
+lto = "thin"
