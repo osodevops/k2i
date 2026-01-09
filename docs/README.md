@@ -26,6 +26,7 @@ K2I is a single-process, embedded Rust application inspired by the Moonlink arch
 
 | Guide | Description |
 |-------|-------------|
+| [Whitepaper](./whitepaper.md) | Comprehensive technical whitepaper |
 | [Quickstart](./quickstart.md) | Get K2I running in 5 minutes |
 | [Configuration](./configuration.md) | Complete configuration reference |
 | [Architecture](./architecture.md) | System design and internals |
