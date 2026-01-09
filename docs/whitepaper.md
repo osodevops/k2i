@@ -166,53 +166,52 @@ K2I assumes failures will occur and designs for resilience:
 ### 4.1 High-Level Overview
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           K2I Ingestion Engine                               │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│   ┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐     │
-│   │  SmartKafka      │    │    Hot Buffer    │    │  Iceberg Writer  │     │
-│   │  Consumer        │───▶│  (Arrow + Index) │───▶│  (Parquet)       │     │
-│   │                  │    │                  │    │                  │     │
-│   │  • rdkafka       │    │  • RecordBatch   │    │  • Catalog       │     │
-│   │  • Backpressure  │    │  • DashMap Index │    │  • Object Store  │     │
-│   │  • Retry Logic   │    │  • TTL Eviction  │    │  • Atomic Commit │     │
-│   └──────────────────┘    └──────────────────┘    └──────────────────┘     │
-│            │                       │                       │                │
-│            │                       │                       │                │
-│            ▼                       ▼                       ▼                │
-│   ┌────────────────────────────────────────────────────────────────────┐   │
-│   │                      Transaction Log                                │   │
-│   │  • Append-only entries with CRC32 checksums                        │   │
-│   │  • Periodic checkpoints for fast recovery                          │   │
-│   │  • Idempotency records for exactly-once semantics                  │   │
-│   └────────────────────────────────────────────────────────────────────┘   │
-│                                                                              │
-│   ┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐     │
-│   │  Health Check    │    │  Metrics Export  │    │  Maintenance     │     │
-│   │                  │    │                  │    │  Scheduler       │     │
-│   │  • /health       │    │  • Prometheus    │    │  • Compaction    │     │
-│   │  • /healthz      │    │  • Counters      │    │  • Expiration    │     │
-│   │  • /readyz       │    │  • Histograms    │    │  • Orphan Clean  │     │
-│   └──────────────────┘    └──────────────────┘    └──────────────────┘     │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                       │
-                                       ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                          External Services                                   │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│   ┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐     │
-│   │  Kafka Brokers   │    │  Iceberg Catalog │    │  Object Storage  │     │
-│   │                  │    │                  │    │                  │     │
-│   │  • Bootstrap     │    │  • REST          │    │  • S3            │     │
-│   │  • SASL/SSL      │    │  • Hive          │    │  • GCS           │     │
-│   │  • Consumer      │    │  • AWS Glue      │    │  • Azure Blob    │     │
-│   │    Groups        │    │  • Nessie        │    │  • Local FS      │     │
-│   └──────────────────┘    └──────────────────┘    └──────────────────┘     │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
++-----------------------------------------------------------------------------+
+|                           K2I Ingestion Engine                              |
++-----------------------------------------------------------------------------+
+|                                                                             |
+|   +------------------+    +------------------+    +------------------+      |
+|   | SmartKafka       |    |    Hot Buffer    |    | Iceberg Writer   |      |
+|   | Consumer         |--->| (Arrow + Index)  |--->| (Parquet)        |      |
+|   |                  |    |                  |    |                  |      |
+|   | - rdkafka        |    | - RecordBatch    |    | - Catalog        |      |
+|   | - Backpressure   |    | - DashMap Index  |    | - Object Store   |      |
+|   | - Retry Logic    |    | - TTL Eviction   |    | - Atomic Commit  |      |
+|   +------------------+    +------------------+    +------------------+      |
+|            |                       |                       |               |
+|            v                       v                       v               |
+|   +---------------------------------------------------------------------+  |
+|   |                      Transaction Log                                |  |
+|   | - Append-only entries with CRC32 checksums                          |  |
+|   | - Periodic checkpoints for fast recovery                            |  |
+|   | - Idempotency records for exactly-once semantics                    |  |
+|   +---------------------------------------------------------------------+  |
+|                                                                             |
+|   +------------------+    +------------------+    +------------------+      |
+|   | Health Check     |    | Metrics Export   |    | Maintenance      |      |
+|   |                  |    |                  |    | Scheduler        |      |
+|   | - /health        |    | - Prometheus     |    | - Compaction     |      |
+|   | - /healthz       |    | - Counters       |    | - Expiration     |      |
+|   | - /readyz        |    | - Histograms     |    | - Orphan Clean   |      |
+|   +------------------+    +------------------+    +------------------+      |
+|                                                                             |
++-----------------------------------------------------------------------------+
+                                       |
+                                       v
++-----------------------------------------------------------------------------+
+|                          External Services                                  |
++-----------------------------------------------------------------------------+
+|                                                                             |
+|   +------------------+    +------------------+    +------------------+      |
+|   | Kafka Brokers    |    | Iceberg Catalog  |    | Object Storage   |      |
+|   |                  |    |                  |    |                  |      |
+|   | - Bootstrap      |    | - REST           |    | - S3             |      |
+|   | - SASL/SSL       |    | - Hive           |    | - GCS            |      |
+|   | - Consumer       |    | - AWS Glue       |    | - Azure Blob     |      |
+|   |   Groups         |    | - Nessie         |    | - Local FS       |      |
+|   +------------------+    +------------------+    +------------------+      |
+|                                                                             |
++-----------------------------------------------------------------------------+
 ```
 
 ### 4.2 Component Responsibilities
@@ -271,11 +270,11 @@ Batching amortizes processing overhead and enables efficient Arrow conversion.
 When the hot buffer reaches capacity, the consumer pauses:
 
 ```
-┌─────────────┐     BufferFull     ┌─────────────┐
-│  Consuming  │──────────────────▶│   Paused    │
-│             │                    │             │
-│  (polling)  │◀──────────────────│  (waiting)  │
-└─────────────┘     BufferSpace    └─────────────┘
++-------------+     BufferFull     +-------------+
+|  Consuming  |------------------>|   Paused    |
+|             |                   |             |
+|  (polling)  |<------------------|  (waiting)  |
++-------------+     BufferSpace    +-------------+
 ```
 
 This prevents memory exhaustion while maintaining offset consistency.
@@ -381,30 +380,30 @@ The Iceberg writer handles the critical path of durable persistence.
 
 ```
 Arrow RecordBatch
-        │
-        ▼
-┌───────────────────┐
-│ Parquet Encoder   │
-│ • Row group: 128K │
-│ • Compression     │
-│ • Statistics      │
-└───────────────────┘
-        │
-        ▼
-┌───────────────────┐
-│ Object Storage    │
-│ • Multipart upload│
-│ • Retry on failure│
-│ • Checksum verify │
-└───────────────────┘
-        │
-        ▼
-┌───────────────────┐
-│ Catalog Commit    │
-│ • CAS semantics   │
-│ • Conflict retry  │
-│ • Snapshot create │
-└───────────────────┘
+        |
+        v
++-------------------+
+| Parquet Encoder   |
+| - Row group: 128K |
+| - Compression     |
+| - Statistics      |
++-------------------+
+        |
+        v
++-------------------+
+| Object Storage    |
+| - Multipart upload|
+| - Retry on failure|
+| - Checksum verify |
++-------------------+
+        |
+        v
++-------------------+
+| Catalog Commit    |
+| - CAS semantics   |
+| - Conflict retry  |
+| - Snapshot create |
++-------------------+
 ```
 
 #### 5.3.2 File Naming Convention
@@ -446,14 +445,14 @@ The transaction log is the foundation for durability and recovery.
 #### 5.4.1 File Format
 
 ```
-┌──────────────────────────────────────────────────────┐
-│                   Log File                            │
-├──────────────────────────────────────────────────────┤
-│ [Length:4 bytes][Entry:N bytes][CRC32:4 bytes]       │
-│ [Length:4 bytes][Entry:N bytes][CRC32:4 bytes]       │
-│ [Length:4 bytes][Entry:N bytes][CRC32:4 bytes]       │
-│ ...                                                   │
-└──────────────────────────────────────────────────────┘
++------------------------------------------------------+
+|                   Log File                           |
++------------------------------------------------------+
+| [Length:4 bytes][Entry:N bytes][CRC32:4 bytes]       |
+| [Length:4 bytes][Entry:N bytes][CRC32:4 bytes]       |
+| [Length:4 bytes][Entry:N bytes][CRC32:4 bytes]       |
+| ...                                                  |
++------------------------------------------------------+
 ```
 
 Each entry is self-describing with integrity verification.
@@ -562,30 +561,30 @@ The write path processes messages from Kafka to the hot buffer:
 
 ```
 Step 1: Poll
-┌─────────────┐
-│   Kafka     │──── poll() ────▶ Vec<RawMessage>
-└─────────────┘
++-------------+
+|   Kafka     |---- poll() -----> Vec<RawMessage>
++-------------+
 
 Step 2: Batch
-┌─────────────┐
-│   Batcher   │──── collect() ──▶ KafkaBatch { messages, offsets }
-└─────────────┘
++-------------+
+|   Batcher   |---- collect() --> KafkaBatch { messages, offsets }
++-------------+
 
 Step 3: Convert
-┌─────────────┐
-│   Arrow     │──── convert() ──▶ RecordBatch
-└─────────────┘
++-------------+
+|   Arrow     |---- convert() --> RecordBatch
++-------------+
 
 Step 4: Buffer
-┌─────────────┐
-│ Hot Buffer  │──── append() ───▶ Updated indexes
-└─────────────┘
++-------------+
+| Hot Buffer  |---- append() ---> Updated indexes
++-------------+
 
 Step 5: Log
-┌─────────────┐
-│ Transaction │──── write() ────▶ OffsetMarker entry
-│    Log      │
-└─────────────┘
++-------------+
+| Transaction |---- write() ----> OffsetMarker entry
+|    Log      |
++-------------+
 ```
 
 **Latency**: < 10ms end-to-end for buffering
@@ -596,55 +595,55 @@ The flush path persists buffered data to Iceberg:
 
 ```
 Step 1: Trigger
-┌─────────────┐
-│   Trigger   │──── evaluate() ─▶ FlushDecision::Flush
-└─────────────┘
++-------------+
+|   Trigger   |---- evaluate() -> FlushDecision::Flush
++-------------+
 
 Step 2: Log Start
-┌─────────────┐
-│ Transaction │──── write() ────▶ FlushStart entry
-│    Log      │
-└─────────────┘
++-------------+
+| Transaction |---- write() ----> FlushStart entry
+|    Log      |
++-------------+
 
 Step 3: Encode
-┌─────────────┐
-│  Parquet    │──── encode() ───▶ Compressed bytes
-│  Encoder    │
-└─────────────┘
++-------------+
+|  Parquet    |---- encode() ---> Compressed bytes
+|  Encoder    |
++-------------+
 
 Step 4: Upload
-┌─────────────┐
-│  Object     │──── put() ──────▶ Immutable file
-│  Storage    │
-└─────────────┘
++-------------+
+|  Object     |---- put() ------> Immutable file
+|  Storage    |
++-------------+
 
 Step 5: Log File
-┌─────────────┐
-│ Transaction │──── write() ────▶ ParquetWritten entry
-│    Log      │
-└─────────────┘
++-------------+
+| Transaction |---- write() ----> ParquetWritten entry
+|    Log      |
++-------------+
 
 Step 6: Commit
-┌─────────────┐
-│  Iceberg    │──── commit() ───▶ New snapshot
-│  Catalog    │
-└─────────────┘
++-------------+
+|  Iceberg    |---- commit() ---> New snapshot
+|  Catalog    |
++-------------+
 
 Step 7: Log Complete
-┌─────────────┐
-│ Transaction │──── write() ────▶ FlushComplete entry
-│    Log      │
-└─────────────┘
++-------------+
+| Transaction |---- write() ----> FlushComplete entry
+|    Log      |
++-------------+
 
 Step 8: Clear
-┌─────────────┐
-│ Hot Buffer  │──── clear() ────▶ Memory freed
-└─────────────┘
++-------------+
+| Hot Buffer  |---- clear() ----> Memory freed
++-------------+
 
 Step 9: Commit Kafka
-┌─────────────┐
-│   Kafka     │──── commit() ───▶ Offsets committed
-└─────────────┘
++-------------+
+|   Kafka     |---- commit() ---> Offsets committed
++-------------+
 ```
 
 **Latency**: 200-800ms typical flush cycle
@@ -793,48 +792,48 @@ K2I automatically recovers from crashes without data loss or duplication.
 
 ```
 Startup
-    │
-    ▼
-┌─────────────────────────────────┐
-│ 1. Load last checkpoint         │
-│    • Last Kafka offsets         │
-│    • Last Iceberg snapshot      │
-└─────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────┐
-│ 2. Replay log since checkpoint  │
-│    • Process each entry         │
-│    • Track incomplete flushes   │
-└─────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────┐
-│ 3. Identify orphan files        │
-│    • FlushStart without Complete│
-│    • ParquetWritten uncommitted │
-└─────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────┐
-│ 4. Build recovery state         │
-│    • Starting offsets           │
-│    • Cleanup actions            │
-└─────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────┐
-│ 5. Execute cleanup              │
-│    • Delete orphan files        │
-│    • Log cleanup actions        │
-└─────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────┐
-│ 6. Resume normal operation      │
-│    • Seek to starting offsets   │
-│    • Begin consuming            │
-└─────────────────────────────────┘
+    |
+    v
++---------------------------------+
+| 1. Load last checkpoint         |
+|    - Last Kafka offsets         |
+|    - Last Iceberg snapshot      |
++---------------------------------+
+    |
+    v
++---------------------------------+
+| 2. Replay log since checkpoint  |
+|    - Process each entry         |
+|    - Track incomplete flushes   |
++---------------------------------+
+    |
+    v
++---------------------------------+
+| 3. Identify orphan files        |
+|    - FlushStart without Complete|
+|    - ParquetWritten uncommitted |
++---------------------------------+
+    |
+    v
++---------------------------------+
+| 4. Build recovery state         |
+|    - Starting offsets           |
+|    - Cleanup actions            |
++---------------------------------+
+    |
+    v
++---------------------------------+
+| 5. Execute cleanup              |
+|    - Delete orphan files        |
+|    - Log cleanup actions        |
++---------------------------------+
+    |
+    v
++---------------------------------+
+| 6. Resume normal operation      |
+|    - Seek to starting offsets   |
+|    - Begin consuming            |
++---------------------------------+
 ```
 
 ### 8.2 Recovery State
