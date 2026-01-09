@@ -1,5 +1,6 @@
 # Build stage
-FROM rust:1.83-bookworm AS builder
+# Using rust:1-bookworm to get the latest stable Rust (1.85+ required for edition2024)
+FROM rust:1-bookworm AS builder
 
 WORKDIR /build
 
