@@ -8,7 +8,6 @@ WORKDIR /build
 RUN apt-get update && apt-get install -y \
     cmake \
     libssl-dev \
-    libsasl2-dev \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
@@ -25,7 +24,6 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
-    libsasl2-2 \
     curl \
     && rm -rf /var/lib/apt/lists/*
 

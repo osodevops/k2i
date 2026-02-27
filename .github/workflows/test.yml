@@ -31,7 +31,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake libssl-dev libsasl2-dev pkg-config
+          sudo apt-get install -y cmake libssl-dev pkg-config
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -69,7 +69,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake libssl-dev libsasl2-dev pkg-config
+          sudo apt-get install -y cmake libssl-dev pkg-config
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -107,7 +107,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake libssl-dev libsasl2-dev pkg-config
+          sudo apt-get install -y cmake libssl-dev pkg-config
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

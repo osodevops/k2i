@@ -265,7 +265,8 @@ K2I supports multiple Iceberg catalog backends:
 - Rust 1.85+ (for edition 2024)
 - CMake
 - OpenSSL development libraries
-- SASL development libraries
+
+> **Kerberos support:** If you need Kerberos (GSSAPI) authentication, add `"gssapi"` to the rdkafka features in `Cargo.toml` and install `cyrus-sasl` (`brew install cyrus-sasl` on macOS, `libsasl2-dev` on Debian/Ubuntu). See [Building with Kerberos Support](docs/configuration.md#building-with-kerberos-support) for details.
 
 ```bash
 # Clone the repository

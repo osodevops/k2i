@@ -135,6 +135,8 @@ Optional section for authenticated Kafka clusters.
 | `SCRAM-SHA-256` | Salted challenge-response (recommended) |
 | `SCRAM-SHA-512` | Stronger variant of SCRAM |
 
+> **Kerberos (GSSAPI):** Kerberos authentication is not included in the default build. To enable it, you must build k2i from source with the `gssapi` feature. See [Building with Kerberos Support](#building-with-kerberos-support) below.
+
 ---
 
 ## Iceberg Configuration
@@ -521,3 +523,58 @@ health_port = 8080
 log_level = "debug"
 log_format = "text"
 ```
+
+---
+
+## Building with Kerberos Support
+
+The default k2i binary supports SASL mechanisms `PLAIN`, `SCRAM-SHA-256`, and `SCRAM-SHA-512`. If your Kafka cluster requires **Kerberos (GSSAPI)** authentication, you need to build from source with the `gssapi` feature enabled.
+
+### Prerequisites
+
+Install the SASL development libraries:
+
+**macOS:**
+```bash
+brew install cyrus-sasl
+```
+
+**Debian/Ubuntu:**
+```bash
+sudo apt-get install libsasl2-dev
+```
+
+**RHEL/Fedora:**
+```bash
+sudo dnf install cyrus-sasl-devel
+```
+
+### Build
+
+Override the rdkafka features when building:
+
+```bash
+git clone https://github.com/osodevops/k2i.git
+cd k2i
+
+# Edit Cargo.toml to add "gssapi" to the rdkafka features:
+#   rdkafka = { version = "0.38", features = ["cmake-build", "ssl", "gssapi"] }
+
+cargo build --release -p k2i-cli
+```
+
+### Docker
+
+To build a Docker image with Kerberos support, add `libsasl2-dev` to the builder stage and `libsasl2-2` to the runtime stage in the Dockerfile, and add `"gssapi"` to the rdkafka features in `Cargo.toml` before building.
+
+### Configuration
+
+Once built with Kerberos support, configure GSSAPI authentication:
+
+```toml
+[kafka.security]
+protocol = "SASL_SSL"
+sasl_mechanism = "GSSAPI"
+```
+
+Ensure your Kerberos keytab and `krb5.conf` are properly configured on the host.

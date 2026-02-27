@@ -13,7 +13,7 @@ ci = "github"
 installers = ["shell", "homebrew"]
 # Target platforms to build apps for (Rust target-triple syntax)
 # Note: aarch64-unknown-linux-gnu removed - requires ARM runners not available for private repos
-# Note: x86_64-pc-windows-msvc removed - OpenSSL and SASL dependencies are complex on Windows
+# Note: x86_64-pc-windows-msvc removed - OpenSSL dependencies are complex on Windows
 targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]
 # Path that installers should place binaries in
 install-path = "CARGO_HOME"
@@ -32,11 +32,9 @@ publish-jobs = ["homebrew"]
 [dist.dependencies.apt]
 cmake = { version = "*", targets = ["x86_64-unknown-linux-gnu"] }
 libssl-dev = { version = "*", targets = ["x86_64-unknown-linux-gnu"] }
-libsasl2-dev = { version = "*", targets = ["x86_64-unknown-linux-gnu"] }
 pkg-config = { version = "*", targets = ["x86_64-unknown-linux-gnu"] }
 
 [dist.dependencies.homebrew]
 cmake = { version = "*", targets = ["x86_64-apple-darwin", "aarch64-apple-darwin"] }
 openssl = { version = "*", targets = ["x86_64-apple-darwin", "aarch64-apple-darwin"] }
-cyrus-sasl = { version = "*", targets = ["x86_64-apple-darwin", "aarch64-apple-darwin"] }
 pkg-config = { version = "*", targets = ["x86_64-apple-darwin", "aarch64-apple-darwin"] }

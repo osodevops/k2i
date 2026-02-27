@@ -16,7 +16,7 @@ rust-version = "1.75"
 
 [workspace.dependencies]
 # Kafka
-rdkafka = { version = "0.38", features = ["cmake-build", "ssl", "gssapi"] }
+rdkafka = { version = "0.38", features = ["cmake-build", "ssl"] }
 
 # Arrow ecosystem
 arrow = { version = "54", features = ["csv", "json", "prettyprint"] }
