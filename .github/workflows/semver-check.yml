@@ -6,12 +6,15 @@ on:
       - 'crates/k2i-core/src/**'
       - 'crates/k2i-core/Cargo.toml'
 
+permissions:
+  contents: read
+
 jobs:
   semver-check:
     name: Detect Breaking Changes
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0  # Need full history for baseline comparison
 
@@ -21,10 +24,10 @@ jobs:
           sudo apt-get install -y cmake libssl-dev pkg-config
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: Run cargo-semver-checks
-        uses: obi1kenobi/cargo-semver-checks-action@v2
+        uses: obi1kenobi/cargo-semver-checks-action@5b298c9520f7096a4683c0bd981a7ac5a7e249ae # v2
         with:
           package: k2i-core
           version-tag-prefix: v
