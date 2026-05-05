@@ -8,4 +8,5 @@ mod eviction;
 mod hot_buffer;
 
 pub use eviction::{EvictionChecker, EvictionDecision, EvictionPolicy, RecordMetadata};
+pub(crate) use hot_buffer::filter_batch_by_lsn;
 pub use hot_buffer::{BufferedRecord, HotBuffer, HotBufferStats, QueryResult, RowId};

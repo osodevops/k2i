@@ -438,7 +438,7 @@ impl CompactionTask {
         }
 
         // Sort by size for efficient grouping
-        files.sort_by(|a, b| a.size_bytes.cmp(&b.size_bytes));
+        files.sort_by_key(|file| file.size_bytes);
 
         Ok(files)
     }

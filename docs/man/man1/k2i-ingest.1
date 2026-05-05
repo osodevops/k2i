@@ -1,0 +1,32 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH k2i-ingest 1  "k2i-ingest "
+.SH NAME
+k2i\-ingest \- Run the ingestion engine
+.SH SYNOPSIS
+\fBk2i\-ingest\fR [\fB\-\-bootstrap\-servers\fR] [\fB\-\-topic\fR] [\fB\-\-consumer\-group\fR] [\fB\-h\fR|\fB\-\-help\fR]
+.SH DESCRIPTION
+Run the ingestion engine
+.SH OPTIONS
+.TP
+\fB\-\-bootstrap\-servers\fR \fI<BOOTSTRAP_SERVERS>\fR
+Override Kafka bootstrap servers
+.TP
+\fB\-\-topic\fR \fI<TOPIC>\fR
+Override Kafka topic
+.TP
+\fB\-\-consumer\-group\fR \fI<CONSUMER_GROUP>\fR
+Override consumer group
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.SH EXTRA
+EXAMPLES:
+  k2i ingest \-\-config config.toml
+  k2i ingest \-\-config /etc/k2i/production.toml
+  k2i ingest \-\-bootstrap\-servers kafka1:9092,kafka2:9092 \-\-topic events
+
+BEHAVIOR:
+  Starts Kafka consumption, health and metrics HTTP servers, optional read\-state
+  RPC, hot buffering, Parquet flushes, transaction\-log writes, and Iceberg
+  catalog commits. SIGINT and SIGTERM trigger graceful shutdown.

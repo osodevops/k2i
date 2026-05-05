@@ -12,12 +12,31 @@ heartbeat_interval_ms = 3000
 max_poll_interval_ms = 300000  # 5 minutes - must exceed longest flush time
 auto_offset_reset = "earliest"
 
+[kafka.format]
+type = "raw"
+
+# Protobuf example:
+# [kafka.format]
+# type = "protobuf"
+# schema_registry_url = "http://localhost:8081"
+# subject_strategy = "topic_name"
+# message_type = "f1.timing.v1.DerivedState"
+# cache_ttl_seconds = 300
+# latest_on_startup = true
+# K2I keeps a stale Schema Registry disk cache under:
+#   <transaction_log.log_dir>/schema-cache
+
 [kafka.security]
 # Uncomment for SASL authentication
 # protocol = "SASL_SSL"
 # sasl_mechanism = "SCRAM-SHA-256"
 # sasl_username = "user"
 # sasl_password = "password"
+
+[schema_evolution]
+mode = "auto-additive"
+on_breaking_change = "pause"
+schema_update_min_interval_seconds = 60
 
 [iceberg]
 catalog_type = "rest"
@@ -69,3 +88,11 @@ metrics_port = 9090
 health_port = 8080
 log_level = "info"
 log_format = "json"
+
+[rpc]
+enabled = false
+socket_path = "./run/k2i.sock"
+read_timeout_ms = 1000
+max_concurrent_scans = 64
+scan_ttl_seconds = 300
+max_frame_bytes = 67108864

@@ -10,6 +10,8 @@ mod entries;
 mod log;
 mod recovery;
 
-pub use entries::{MaintenanceOp, TransactionEntry};
+pub use entries::{MaintenanceOp, SchemaField, TransactionEntry};
 pub use log::TransactionLog;
-pub use recovery::{CleanupResult, OrphanFile, OrphanReason, RecoveryState, RecoverySummary};
+pub use recovery::{
+    CleanupResult, OrphanFile, OrphanReason, RecoveredReadDataFile, RecoveryState, RecoverySummary,
+};

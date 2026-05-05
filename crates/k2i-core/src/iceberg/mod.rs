@@ -17,8 +17,10 @@ mod glue;
 mod hive;
 mod metadata_cache;
 mod nessie;
+mod official;
 pub mod rest_api;
 pub mod schema_evolution;
+mod sql;
 mod table_manager;
 mod transaction_coordinator;
 mod writer;
@@ -37,10 +39,15 @@ pub use metadata_cache::{
     CachedValue, MetadataCache, MetadataCacheConfig, SharedMetadataCache,
 };
 pub use nessie::{NessieCatalogClient, NessieCatalogFactory, NessieClientConfig};
+pub use official::{
+    commit_append_with_catalog, table_schema_to_iceberg_schema, OfficialCommitResult,
+    OfficialRestCommitter,
+};
 pub use schema_evolution::{
     IcebergType, InferredField, SchemaDiff, SchemaEvolution, SchemaEvolutionConfig,
     SchemaEvolutionPlan, SchemaEvolver, SchemaInference, TypeChange,
 };
+pub use sql::{SqlCatalogClient, SqlCatalogFactory};
 pub use table_manager::{SchemaMismatch, TableManager, TableManagerBuilder};
 pub use transaction_coordinator::{
     CommitResult, IdempotencyKey, IdempotencyRecord, TransactionCoordinator,

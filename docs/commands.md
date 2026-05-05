@@ -13,6 +13,25 @@ These options are available for all commands:
 | `--help` | `-h` | Print help information |
 | `--version` | | Print version information |
 
+## Local E2E Verification Scripts
+
+These repository scripts are not `k2i` subcommands, but they are the canonical
+local verification entry points used before release:
+
+| Script | Description |
+|--------|-------------|
+| `scripts/e2e-docker.sh` | Correctness flow with Kafka, Schema Registry, K2I, read-state RPC, Protobuf schema evolution, and DuckDB Parquet validation |
+| `K2I_E2E_LOAD_MESSAGES=100000 scripts/e2e-docker-load.sh` | High-volume local load profile with full read-state visibility and zero-error metrics assertions |
+| `scripts/e2e-docker-iceberg.sh` | Real Iceberg REST metadata validation with DuckDB `iceberg_scan` |
+| `K2I_E2E_LOAD_MESSAGES=100000 scripts/e2e-docker-iceberg-load.sh` | Production-oriented local Iceberg load profile: 100,000 rows by default, cold flush required, Parquet validation, Iceberg metadata validation, snapshot growth, DuckDB `iceberg_scan`, and zero-error metrics |
+
+The load scripts also support `K2I_E2E_LOAD_CONCURRENCY`,
+`K2I_E2E_LOAD_PARTITIONS`, and `K2I_E2E_LOAD_TIMEOUT_SECONDS`.
+`scripts/e2e-docker-iceberg-load.sh` additionally supports
+`K2I_E2E_ICEBERG_LOAD_MIN_DATA_FILES` and
+`K2I_E2E_ICEBERG_LOAD_MIN_SNAPSHOTS` when intentionally changing the load
+shape.
+
 ## Commands
 
 ### k2i ingest
@@ -103,6 +122,7 @@ Components:
   iceberg: Healthy
   catalog: Healthy
   txlog: Healthy
+  schema: Healthy
 
 Metrics:
   messages_consumed: 1234567
@@ -314,6 +334,183 @@ Configuration error: missing required field 'kafka.topic'
 
 ---
 
+### k2i table
+
+Register or reset existing Parquet data for a K2I-readable table.
+
+```bash
+k2i table <COMMAND> [OPTIONS]
+```
+
+#### Subcommands
+
+| Command | Description |
+|---------|-------------|
+| `register` | Register existing Parquet files without copying them |
+| `reset` | Reset a registered table |
+
+---
+
+### k2i table register
+
+Register one or more existing Parquet files as an Iceberg table and read-state
+source.
+
+```bash
+k2i table register --database <DATABASE> --table <TABLE> --source <SOURCE> [OPTIONS]
+```
+
+#### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--database <DATABASE>` | Required | Database/namespace name |
+| `--table <TABLE>` | Required | Table name |
+| `--source <SOURCE>` | Required | Parquet file, directory, or glob. Can be repeated |
+| `--schema-source <SOURCE>` | `first-file` | Use the first Parquet file schema or a `.proto` file path |
+| `--message-type <TYPE>` | | Fully-qualified Protobuf message type when `--schema-source` is a `.proto` file |
+| `--kafka-topic <TOPIC>` | | Optional topic label for read-state provenance |
+
+#### Examples
+
+```bash
+# Register a directory of historical Parquet files
+k2i table register \
+  --config config.toml \
+  --database f1 \
+  --table derived_state \
+  --source '/data/historical/*.parquet'
+
+# Register with an explicit Protobuf schema
+k2i table register \
+  --config config.toml \
+  --database f1 \
+  --table derived_state \
+  --source /data/historical \
+  --schema-source schemas/derived_state.proto \
+  --message-type f1.timing.v1.DerivedState
+```
+
+#### Behavior
+
+- Expands files, directories, and glob sources.
+- Infers schema from the first Parquet file unless a `.proto` schema source is supplied.
+- Registers metadata through the configured catalog path.
+- Adds transaction-log records so the read-state path can recover the registered table.
+- Does not copy source files.
+
+---
+
+### k2i table reset
+
+Reset a registered table.
+
+```bash
+k2i table reset --database <DATABASE> --table <TABLE> [OPTIONS]
+```
+
+#### Options
+
+| Option | Description |
+|--------|-------------|
+| `--database <DATABASE>` | Database/namespace name |
+| `--table <TABLE>` | Table name |
+| `--keep-data` | Retain source data files |
+
+#### Example
+
+```bash
+k2i table reset --config config.toml --database f1 --table derived_state --keep-data
+```
+
+---
+
+### k2i dev
+
+Run a zero-cloud local development instance. This command builds an in-process
+configuration that uses Kafka plus a local filesystem warehouse, a SQLite-backed
+catalog, local transaction logs, and an enabled read-state Unix socket.
+
+```bash
+k2i dev --topic <TOPIC> --warehouse <PATH> [OPTIONS]
+```
+
+#### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--topic <TOPIC>` | Required | Kafka topic to consume |
+| `--warehouse <PATH>` | Required | Local warehouse directory |
+| `--bootstrap-servers <SERVERS>` | `localhost:9092` | Kafka bootstrap servers |
+| `--database <DATABASE>` | `default` | Database/namespace name |
+| `--table <TABLE>` | `events` | Table name |
+| `--consumer-group <GROUP>` | `k2i-dev` | Kafka consumer group |
+| `--schema-registry-url <URL>` | | Optional Confluent Schema Registry URL for Protobuf values |
+| `--message-type <TYPE>` | | Optional fully-qualified Protobuf message type |
+
+#### Examples
+
+```bash
+# Raw Kafka values into a local warehouse
+k2i dev --topic events --warehouse ./warehouse
+
+# Confluent-framed Protobuf values
+k2i dev \
+  --topic f1.timing.derived_state \
+  --warehouse ./warehouse \
+  --schema-registry-url http://localhost:8081 \
+  --message-type f1.timing.v1.DerivedState
+```
+
+#### Behavior
+
+- Creates the warehouse, transaction-log, and runtime socket directories.
+- Uses a local SQLite catalog at `<warehouse>/catalog.db`.
+- Uses the filesystem object store rooted at the warehouse path.
+- Enables read-state RPC at `<warehouse>/run/k2i.sock`.
+
+---
+
+### k2i completions
+
+Generate shell completions or recursive man pages from the live `clap` command
+definitions.
+
+```bash
+k2i completions <COMMAND>
+```
+
+#### Subcommands
+
+| Command | Description |
+|---------|-------------|
+| `bash` | Print bash completions to stdout |
+| `zsh` | Print zsh completions to stdout |
+| `fish` | Print fish completions to stdout |
+| `power-shell` | Print PowerShell completions to stdout |
+| `man` | Generate recursive `.1` man page files |
+
+#### Examples
+
+```bash
+# Shell completions
+k2i completions bash > ~/.local/share/bash-completion/completions/k2i
+k2i completions zsh > ~/.zfunc/_k2i
+k2i completions fish > ~/.config/fish/completions/k2i.fish
+k2i completions power-shell > k2i.ps1
+
+# Man pages
+k2i completions man --output-dir docs/man/man1
+man ./docs/man/man1/k2i.1
+man ./docs/man/man1/k2i-table-register.1
+```
+
+The checked-in man pages under `docs/man/man1/` are generated with this command
+and should be regenerated after any CLI help, flag, subcommand, or version
+change.
+
+---
+
 ## Environment Variables
 
 K2I respects these environment variables:
@@ -367,28 +564,22 @@ When running `k2i ingest`, HTTP endpoints are available:
 
 ```json
 {
-  "status": "Healthy",
+  "status": "healthy",
   "components": {
-    "kafka": { "status": "Healthy" },
-    "buffer": { "status": "Healthy" },
-    "iceberg": { "status": "Healthy" },
-    "catalog": { "status": "Healthy" },
-    "txlog": { "status": "Healthy" }
-  },
-  "metrics": {
-    "messages_consumed": 1234567,
-    "rows_flushed": 1200000,
-    "buffer_flushes": 240,
-    "errors": 0,
-    "backpressure_events": 3
+    "kafka": { "status": "healthy" },
+    "buffer": { "status": "healthy" },
+    "iceberg": { "status": "healthy" },
+    "catalog": { "status": "healthy" },
+    "txlog": { "status": "healthy" },
+    "schema": { "status": "healthy" }
   }
 }
 ```
 
 #### /healthz and /readyz
 
-- Return `200 OK` if operational (healthy or degraded)
-- Return `503 Service Unavailable` if unhealthy
+- `/healthz` is the liveness probe. It returns `200 OK` when the process is operational (`healthy` or `degraded`) and `503 Service Unavailable` when overall health is `unhealthy`.
+- `/readyz` is the readiness probe. It returns `200 OK` only when the process is operational and there are no readiness blockers. Schema pauses from manual evolution or breaking Protobuf changes return `503 Service Unavailable` even when `/healthz` still returns `200 OK`.
 
 ### Metrics Endpoint (port 9090)
 
@@ -399,9 +590,9 @@ When running `k2i ingest`, HTTP endpoints are available:
 #### Sample Metrics
 
 ```
-# HELP k2i_messages_total Total messages consumed from Kafka
-# TYPE k2i_messages_total counter
-k2i_messages_total 1234567
+# HELP k2i_messages_consumed_total Total messages consumed from Kafka
+# TYPE k2i_messages_consumed_total counter
+k2i_messages_consumed_total 1234567
 
 # HELP k2i_buffer_size_bytes Current buffer memory usage
 # TYPE k2i_buffer_size_bytes gauge
@@ -424,23 +615,6 @@ k2i_flush_duration_seconds_count 240
 
 ---
 
-## Shell Completion
-
-Generate shell completions:
-
-```bash
-# Bash
-k2i --generate bash > /etc/bash_completion.d/k2i
-
-# Zsh
-k2i --generate zsh > ~/.zsh/completions/_k2i
-
-# Fish
-k2i --generate fish > ~/.config/fish/completions/k2i.fish
-```
-
----
-
 ## Quick Reference
 
 ```bash
@@ -452,6 +626,12 @@ k2i status --url http://localhost:8080
 
 # Validate config
 k2i validate --config config.toml
+
+# Register existing Parquet files
+k2i table register --config config.toml --database f1 --table derived_state --source '/data/*.parquet'
+
+# Run a zero-cloud local dev instance
+k2i dev --topic events --warehouse ./warehouse
 
 # Manual maintenance
 k2i maintenance compact --config config.toml
@@ -468,4 +648,9 @@ k2i ingest -vv
 k2i --help
 k2i ingest --help
 k2i maintenance --help
+
+# Full local Docker validation
+scripts/e2e-docker.sh
+scripts/e2e-docker-iceberg.sh
+K2I_E2E_LOAD_MESSAGES=100000 scripts/e2e-docker-iceberg-load.sh
 ```

@@ -34,6 +34,10 @@ pub enum Error {
     #[error("Storage error: {0}")]
     Storage(String),
 
+    /// Real-time read state error
+    #[error("Read state error: {0}")]
+    ReadState(String),
+
     /// IO error
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),

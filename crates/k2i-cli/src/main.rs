@@ -74,7 +74,25 @@ mod server;
 
 #[derive(Parser)]
 #[command(name = "k2i")]
-#[command(about = "Kafka to Iceberg streaming ingestion CLI", long_about = None)]
+#[command(about = "Kafka to Iceberg streaming ingestion CLI")]
+#[command(
+    long_about = "K2I is a single-process Kafka-to-Apache-Iceberg ingestion engine. It consumes Kafka messages, decodes configured payload formats, keeps recent rows in an Arrow hot buffer, writes Parquet files, commits Iceberg metadata, records durable progress in a transaction log, and exposes health, metrics, and optional local read-state RPC endpoints."
+)]
+#[command(after_long_help = "\
+HTTP ENDPOINTS:
+  /health   Full JSON health response
+  /healthz  Liveness probe; stays 200 for degraded but operational states
+  /readyz   Readiness probe; returns 503 for schema pauses and blockers
+  /metrics  Prometheus metrics endpoint on the configured metrics port
+
+LOCAL VERIFICATION:
+  scripts/e2e-docker.sh
+  K2I_E2E_LOAD_MESSAGES=100000 scripts/e2e-docker-load.sh
+  scripts/e2e-docker-iceberg.sh
+  K2I_E2E_LOAD_MESSAGES=100000 scripts/e2e-docker-iceberg-load.sh
+
+The Iceberg load E2E validates real REST metadata and DuckDB iceberg_scan over
+100,000 rows by default.")]
 #[command(version)]
 struct Cli {
     #[command(subcommand)]
@@ -92,6 +110,16 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Run the ingestion engine
+    #[command(after_long_help = "\
+EXAMPLES:
+  k2i ingest --config config.toml
+  k2i ingest --config /etc/k2i/production.toml
+  k2i ingest --bootstrap-servers kafka1:9092,kafka2:9092 --topic events
+
+BEHAVIOR:
+  Starts Kafka consumption, health and metrics HTTP servers, optional read-state
+  RPC, hot buffering, Parquet flushes, transaction-log writes, and Iceberg
+  catalog commits. SIGINT and SIGTERM trigger graceful shutdown.")]
     Ingest {
         /// Override Kafka bootstrap servers
         #[arg(long)]
@@ -107,6 +135,14 @@ enum Commands {
     },
 
     /// Show status and health
+    #[command(after_long_help = "\
+EXAMPLES:
+  k2i status
+  k2i status --url http://k2i-prod.internal:8080
+
+BEHAVIOR:
+  Queries /health at the provided URL, then derives /metrics by replacing port
+  8080 with 9090.")]
     Status {
         /// Health endpoint URL
         #[arg(long, default_value = "http://localhost:8080")]
@@ -114,22 +150,204 @@ enum Commands {
     },
 
     /// Run maintenance tasks manually
+    #[command(after_long_help = "\
+EXAMPLES:
+  k2i maintenance compact --config config.toml
+  k2i maintenance expire-snapshots --config config.toml
+  k2i maintenance clean-orphans --config config.toml")]
     Maintenance {
         #[command(subcommand)]
         action: MaintenanceAction,
     },
 
+    /// Register or reset table data
+    #[command(after_long_help = "\
+EXAMPLES:
+  k2i table register --config config.toml --database f1 --table derived_state --source '/data/*.parquet'
+  k2i table reset --config config.toml --database f1 --table derived_state --keep-data")]
+    Table {
+        #[command(subcommand)]
+        action: TableAction,
+    },
+
+    /// Run a zero-cloud local development instance
+    #[command(after_long_help = "\
+EXAMPLES:
+  k2i dev --topic events --warehouse ./warehouse
+  k2i dev --topic f1.timing.derived_state --warehouse ./warehouse --schema-registry-url http://localhost:8081 --message-type f1.timing.v1.DerivedState
+
+BEHAVIOR:
+  Creates a local warehouse, transaction-log directory, runtime socket directory,
+  SQLite catalog, filesystem object store, and enabled read-state RPC socket.")]
+    Dev {
+        /// Kafka topic to consume
+        #[arg(long)]
+        topic: String,
+
+        /// Local warehouse directory
+        #[arg(long)]
+        warehouse: PathBuf,
+
+        /// Kafka bootstrap servers
+        #[arg(long, default_value = "localhost:9092")]
+        bootstrap_servers: String,
+
+        /// Database/namespace name
+        #[arg(long, default_value = "default")]
+        database: String,
+
+        /// Table name
+        #[arg(long, default_value = "events")]
+        table: String,
+
+        /// Consumer group
+        #[arg(long, default_value = "k2i-dev")]
+        consumer_group: String,
+
+        /// Optional Confluent Schema Registry URL for Protobuf values
+        #[arg(long)]
+        schema_registry_url: Option<String>,
+
+        /// Optional fully-qualified Protobuf message type
+        #[arg(long)]
+        message_type: Option<String>,
+    },
+
     /// Validate configuration file
+    #[command(after_long_help = "\
+EXAMPLES:
+  k2i validate --config config.toml
+  k2i validate --config /etc/k2i/production.toml")]
     Validate,
+
+    /// Generate shell completions and man pages
+    #[command(after_long_help = "\
+EXAMPLES:
+  k2i completions bash > ~/.local/share/bash-completion/completions/k2i
+  k2i completions zsh > ~/.zfunc/_k2i
+  k2i completions fish > ~/.config/fish/completions/k2i.fish
+  k2i completions power-shell > k2i.ps1
+  k2i completions man --output-dir docs/man/man1")]
+    Completions {
+        #[command(subcommand)]
+        action: CompletionAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum CompletionAction {
+    /// Generate bash completions
+    #[command(
+        after_long_help = "EXAMPLE:\n  k2i completions bash > ~/.local/share/bash-completion/completions/k2i"
+    )]
+    Bash,
+
+    /// Generate zsh completions
+    #[command(after_long_help = "EXAMPLE:\n  k2i completions zsh > ~/.zfunc/_k2i")]
+    Zsh,
+
+    /// Generate fish completions
+    #[command(
+        after_long_help = "EXAMPLE:\n  k2i completions fish > ~/.config/fish/completions/k2i.fish"
+    )]
+    Fish,
+
+    /// Generate PowerShell completions
+    #[command(after_long_help = "EXAMPLE:\n  k2i completions power-shell > k2i.ps1")]
+    PowerShell,
+
+    /// Generate recursive man page files
+    #[command(after_long_help = "\
+EXAMPLES:
+  k2i completions man --output-dir docs/man/man1
+  k2i completions man --output-dir /usr/local/share/man/man1
+  man ./docs/man/man1/k2i.1")]
+    Man {
+        /// Directory to write .1 man page files into
+        #[arg(long)]
+        output_dir: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum TableAction {
+    /// Register existing Parquet files without copying them
+    #[command(after_long_help = "\
+EXAMPLES:
+  k2i table register --config config.toml --database f1 --table derived_state --source '/data/historical/*.parquet'
+  k2i table register --config config.toml --database f1 --table derived_state --source /data/historical --schema-source schemas/derived_state.proto --message-type f1.timing.v1.DerivedState
+
+BEHAVIOR:
+  Expands files, directories, and globs. Infers schema from the first Parquet
+  file unless a .proto schema source is supplied. Registers metadata through
+  the configured catalog path and records transaction-log entries for recovery.
+  Source files are not copied.")]
+    Register {
+        /// Database/namespace name
+        #[arg(long)]
+        database: String,
+
+        /// Table name
+        #[arg(long)]
+        table: String,
+
+        /// Source Parquet file, directory, or glob. Can be provided multiple times.
+        #[arg(long = "source", required = true)]
+        sources: Vec<String>,
+
+        /// Schema source: first-file or path to a .proto file
+        #[arg(long, default_value = "first-file")]
+        schema_source: String,
+
+        /// Fully-qualified Protobuf message type when --schema-source is a .proto file
+        #[arg(long)]
+        message_type: Option<String>,
+
+        /// Optional topic label for read-state provenance
+        #[arg(long)]
+        kafka_topic: Option<String>,
+    },
+
+    /// Reset a registered table
+    #[command(after_long_help = "\
+EXAMPLE:
+  k2i table reset --config config.toml --database f1 --table derived_state --keep-data")]
+    Reset {
+        /// Database/namespace name
+        #[arg(long)]
+        database: String,
+
+        /// Table name
+        #[arg(long)]
+        table: String,
+
+        /// Retain source data files
+        #[arg(long)]
+        keep_data: bool,
+    },
 }
 
 #[derive(Subcommand)]
 enum MaintenanceAction {
     /// Run compaction
+    #[command(after_long_help = "\
+BEHAVIOR:
+  Scans the configured table for files smaller than compaction_threshold_mb,
+  groups them toward compaction_target_mb, writes replacement Parquet files,
+  and commits the resulting metadata through the configured catalog path.")]
     Compact,
     /// Expire old snapshots
+    #[command(after_long_help = "\
+BEHAVIOR:
+  Identifies snapshots older than snapshot_retention_days and removes old
+  snapshot metadata. Data files still referenced by retained snapshots are not
+  deleted.")]
     ExpireSnapshots,
     /// Clean up orphan files
+    #[command(after_long_help = "\
+BEHAVIOR:
+  Compares files present in the warehouse with files referenced by table
+  snapshots and deletes orphan files older than orphan_retention_days.")]
     CleanOrphans,
 }
 
@@ -224,10 +442,69 @@ async fn execute_command(cli: Cli) -> Result<()> {
             }
         }
 
+        Commands::Table { action } => {
+            let config = load_config(&cli.config)?;
+            match action {
+                TableAction::Register {
+                    database,
+                    table,
+                    sources,
+                    schema_source,
+                    message_type,
+                    kafka_topic,
+                } => {
+                    commands::table::register(
+                        config,
+                        database,
+                        table,
+                        sources,
+                        schema_source,
+                        message_type,
+                        kafka_topic,
+                    )
+                    .await?;
+                }
+                TableAction::Reset {
+                    database,
+                    table,
+                    keep_data,
+                } => {
+                    commands::table::reset(config, database, table, keep_data).await?;
+                }
+            }
+        }
+
+        Commands::Dev {
+            topic,
+            warehouse,
+            bootstrap_servers,
+            database,
+            table,
+            consumer_group,
+            schema_registry_url,
+            message_type,
+        } => {
+            commands::dev::run(commands::dev::DevOptions {
+                topic,
+                warehouse,
+                bootstrap_servers,
+                database,
+                table,
+                consumer_group,
+                schema_registry_url,
+                message_type,
+            })
+            .await?;
+        }
+
         Commands::Validate => {
             let config = load_config(&cli.config)?;
             config.validate()?;
             println!("Configuration is valid");
+        }
+
+        Commands::Completions { action } => {
+            commands::completions::run(action)?;
         }
     }
 

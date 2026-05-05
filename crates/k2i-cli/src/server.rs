@@ -163,7 +163,7 @@ async fn healthz_handler(State(state): State<Arc<ServerState>>) -> impl IntoResp
 /// Kubernetes readiness probe handler.
 async fn readyz_handler(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
     // Readiness: Can we accept traffic?
-    if state.health.is_operational() {
+    if state.health.is_ready() {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE

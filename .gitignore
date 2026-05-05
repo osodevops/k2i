@@ -23,3 +23,6 @@ transaction_logs/
 # Test artifacts
 *.profraw
 *.profdata
+
+# Local SEO research inputs
+seo-research/semrush-data/

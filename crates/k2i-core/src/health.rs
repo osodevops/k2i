@@ -31,6 +31,7 @@ pub enum HealthStatus {
 /// Health check manager for tracking component health.
 pub struct HealthCheck {
     components: RwLock<HashMap<String, ComponentStatus>>,
+    readiness_blockers: RwLock<HashMap<String, String>>,
     #[allow(dead_code)]
     started_at: Option<Instant>,
     job_running: RwLock<bool>,
@@ -41,6 +42,7 @@ impl HealthCheck {
     pub fn new() -> Self {
         Self {
             components: RwLock::new(HashMap::new()),
+            readiness_blockers: RwLock::new(HashMap::new()),
             started_at: None,
             job_running: RwLock::new(false),
         }
@@ -56,6 +58,7 @@ impl HealthCheck {
     pub fn mark_healthy(&self, name: &str) {
         let mut components = self.components.write();
         components.insert(name.to_string(), ComponentStatus::Healthy);
+        self.clear_readiness_blocker(name);
     }
 
     /// Mark a component as degraded.
@@ -113,6 +116,28 @@ impl HealthCheck {
             self.overall_status(),
             HealthStatus::Healthy | HealthStatus::Degraded
         )
+    }
+
+    /// Block readiness for a component while keeping liveness independent.
+    pub fn block_readiness(&self, name: &str, reason: &str) {
+        self.readiness_blockers
+            .write()
+            .insert(name.to_string(), reason.to_string());
+    }
+
+    /// Remove a readiness blocker for a component.
+    pub fn clear_readiness_blocker(&self, name: &str) {
+        self.readiness_blockers.write().remove(name);
+    }
+
+    /// Get all current readiness blockers.
+    pub fn readiness_blockers(&self) -> HashMap<String, String> {
+        self.readiness_blockers.read().clone()
+    }
+
+    /// Check whether the process is ready to serve normal traffic.
+    pub fn is_ready(&self) -> bool {
+        self.is_operational() && self.readiness_blockers.read().is_empty()
     }
 
     /// Mark the ingestion job as started.
@@ -212,6 +237,29 @@ mod tests {
 
         health.job_completed();
         assert!(!health.is_job_running());
+    }
+
+    #[test]
+    fn test_readiness_blockers_do_not_make_liveness_unhealthy() {
+        let health = HealthCheck::new();
+        health.register_component("schema");
+        health.mark_degraded("schema", "breaking schema change");
+        health.block_readiness("schema", "operator action required");
+
+        assert_eq!(health.overall_status(), HealthStatus::Degraded);
+        assert!(health.is_operational());
+        assert!(!health.is_ready());
+        assert_eq!(
+            health
+                .readiness_blockers()
+                .get("schema")
+                .map(String::as_str),
+            Some("operator action required")
+        );
+
+        health.mark_healthy("schema");
+        assert!(health.is_ready());
+        assert!(health.readiness_blockers().is_empty());
     }
 
     #[test]

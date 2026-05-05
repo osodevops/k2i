@@ -2,6 +2,13 @@
 
 This guide covers common issues and their solutions when running K2I.
 
+Related deep dives:
+
+- [Schema Registry Protobuf](./schema-registry-protobuf.md) for schema pause and breaking-change behavior.
+- [Iceberg REST Catalog](./iceberg-rest-catalog.md) for REST commit flow and backend caveats.
+- [DuckDB Iceberg Validation](./duckdb-iceberg-validation.md) for local Parquet and `iceberg_scan` checks.
+- [Production Readiness](./production-readiness.md) for current hardening follow-ups.
+
 ## Diagnostic Commands
 
 ### Check Health Status
@@ -279,10 +286,13 @@ Error: Table not found: analytics.events
 
 **Solution:**
 ```bash
-# Create table via Spark/DuckDB/Trino
+# Create table via Spark/DuckDB/Trino, or use K2I table commands where appropriate
 spark-sql -e "CREATE TABLE analytics.events ..."
 
-# Or use catalog REST API
+# K2I table command help
+k2i table --help
+
+# Or use the catalog REST API directly
 curl -X POST http://localhost:8181/v1/namespaces/analytics/tables ...
 ```
 
@@ -462,18 +472,39 @@ ttl_seconds = 30
 
 **Symptom:**
 ```json
-{"status": "Degraded", "components": {"catalog": {"status": "Degraded"}}}
+{"status": "degraded", "components": {"catalog": {"status": "degraded"}}}
 ```
 
 **Cause:** Non-critical component experiencing issues but still operational.
 
 **Action:** Check component logs for warnings, monitor closely.
 
+#### Readiness Blocked by Schema Evolution
+
+**Symptom:**
+```bash
+curl -i http://localhost:8080/healthz
+# HTTP/1.1 200 OK
+
+curl -i http://localhost:8080/readyz
+# HTTP/1.1 503 Service Unavailable
+```
+
+`/health` shows the `schema` component as degraded, often with a message about a breaking Protobuf change or `schema_evolution.mode=manual`.
+
+**Cause:** K2I has paused ingestion before assigning read LSNs or committing Kafka offsets for incompatible data. This protects the table from type changes, removed fields, required-field additions, or manual-mode additive changes that have not been approved.
+
+**Action:**
+1. Inspect K2I logs for the schema ID and field-level reason.
+2. Check the Schema Registry subject configured by `[kafka.format]`.
+3. Either roll back or fix the producer schema, or apply the intended table schema migration.
+4. Restart K2I after operator action. Do not force Kafka offsets past incompatible records unless a separate recovery plan accounts for the skipped data.
+
 #### Unhealthy Status
 
 **Symptom:**
 ```json
-{"status": "Unhealthy", "components": {"kafka": {"status": "Unhealthy"}}}
+{"status": "unhealthy", "components": {"kafka": {"status": "unhealthy"}}}
 ```
 
 **Cause:** Critical component failed.

@@ -1,0 +1,21 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH k2i-completions-man 1  "k2i-completions-man "
+.SH NAME
+k2i\-completions\-man \- Generate recursive man page files
+.SH SYNOPSIS
+\fBk2i\-completions\-man\fR <\fB\-\-output\-dir\fR> [\fB\-h\fR|\fB\-\-help\fR]
+.SH DESCRIPTION
+Generate recursive man page files
+.SH OPTIONS
+.TP
+\fB\-\-output\-dir\fR \fI<OUTPUT_DIR>\fR
+Directory to write .1 man page files into
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.SH EXTRA
+EXAMPLES:
+  k2i completions man \-\-output\-dir docs/man/man1
+  k2i completions man \-\-output\-dir /usr/local/share/man/man1
+  man ./docs/man/man1/k2i.1

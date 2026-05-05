@@ -314,7 +314,7 @@ impl ExpirationTask {
         }
 
         // Sort by timestamp (oldest first)
-        snapshots.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+        snapshots.sort_by_key(|snapshot| snapshot.timestamp);
 
         Ok(snapshots)
     }

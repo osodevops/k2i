@@ -1,0 +1,17 @@
+target
+.git
+.gitignore
+.DS_Store
+**/.DS_Store
+
+# Local editor and automation artifacts.
+.idea
+.vscode
+.agents
+.claude
+
+# Local runtime output.
+*.log
+docker/e2e/*.log
+tmp
+temp

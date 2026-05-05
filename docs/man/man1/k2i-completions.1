@@ -1,0 +1,39 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH k2i-completions 1  "k2i-completions "
+.SH NAME
+k2i\-completions \- Generate shell completions and man pages
+.SH SYNOPSIS
+\fBk2i\-completions\fR [\fB\-h\fR|\fB\-\-help\fR] <\fIsubcommands\fR>
+.SH DESCRIPTION
+Generate shell completions and man pages
+.SH OPTIONS
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.SH SUBCOMMANDS
+.TP
+k2i\-completions\-bash(1)
+Generate bash completions
+.TP
+k2i\-completions\-zsh(1)
+Generate zsh completions
+.TP
+k2i\-completions\-fish(1)
+Generate fish completions
+.TP
+k2i\-completions\-power\-shell(1)
+Generate PowerShell completions
+.TP
+k2i\-completions\-man(1)
+Generate recursive man page files
+.TP
+k2i\-completions\-help(1)
+Print this message or the help of the given subcommand(s)
+.SH EXTRA
+EXAMPLES:
+  k2i completions bash > ~/.local/share/bash\-completion/completions/k2i
+  k2i completions zsh > ~/.zfunc/_k2i
+  k2i completions fish > ~/.config/fish/completions/k2i.fish
+  k2i completions power\-shell > k2i.ps1
+  k2i completions man \-\-output\-dir docs/man/man1

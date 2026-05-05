@@ -1,0 +1,25 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH k2i-table-reset 1  "k2i-table-reset "
+.SH NAME
+k2i\-table\-reset \- Reset a registered table
+.SH SYNOPSIS
+\fBk2i\-table\-reset\fR <\fB\-\-database\fR> <\fB\-\-table\fR> [\fB\-\-keep\-data\fR] [\fB\-h\fR|\fB\-\-help\fR]
+.SH DESCRIPTION
+Reset a registered table
+.SH OPTIONS
+.TP
+\fB\-\-database\fR \fI<DATABASE>\fR
+Database/namespace name
+.TP
+\fB\-\-table\fR \fI<TABLE>\fR
+Table name
+.TP
+\fB\-\-keep\-data\fR
+Retain source data files
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.SH EXTRA
+EXAMPLE:
+  k2i table reset \-\-config config.toml \-\-database f1 \-\-table derived_state \-\-keep\-data

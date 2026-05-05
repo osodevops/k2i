@@ -899,6 +899,8 @@ mod tests {
             rest: Default::default(),
             glue: Default::default(),
             nessie: None,
+            sql_catalog: None,
+            object_store: Default::default(),
         }
     }
 

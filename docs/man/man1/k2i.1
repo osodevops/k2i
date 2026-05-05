@@ -1,0 +1,64 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH k2i 1  "k2i 0.2.0"
+.SH NAME
+k2i \- Kafka to Iceberg streaming ingestion CLI
+.SH SYNOPSIS
+\fBk2i\fR [\fB\-c\fR|\fB\-\-config\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIsubcommands\fR>
+.SH DESCRIPTION
+K2I is a single\-process Kafka\-to\-Apache\-Iceberg ingestion engine. It consumes Kafka messages, decodes configured payload formats, keeps recent rows in an Arrow hot buffer, writes Parquet files, commits Iceberg metadata, records durable progress in a transaction log, and exposes health, metrics, and optional local read\-state RPC endpoints.
+.SH OPTIONS
+.TP
+\fB\-c\fR, \fB\-\-config\fR \fI<CONFIG>\fR
+Path to configuration file
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Enable verbose logging (\-v for debug, \-vv for trace)
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.SH SUBCOMMANDS
+.TP
+k2i\-ingest(1)
+Run the ingestion engine
+.TP
+k2i\-status(1)
+Show status and health
+.TP
+k2i\-maintenance(1)
+Run maintenance tasks manually
+.TP
+k2i\-table(1)
+Register or reset table data
+.TP
+k2i\-dev(1)
+Run a zero\-cloud local development instance
+.TP
+k2i\-validate(1)
+Validate configuration file
+.TP
+k2i\-completions(1)
+Generate shell completions and man pages
+.TP
+k2i\-help(1)
+Print this message or the help of the given subcommand(s)
+.SH EXTRA
+HTTP ENDPOINTS:
+  /health   Full JSON health response
+  /healthz  Liveness probe; stays 200 for degraded but operational states
+  /readyz   Readiness probe; returns 503 for schema pauses and blockers
+  /metrics  Prometheus metrics endpoint on the configured metrics port
+
+LOCAL VERIFICATION:
+  scripts/e2e\-docker.sh
+  K2I_E2E_LOAD_MESSAGES=100000 scripts/e2e\-docker\-load.sh
+  scripts/e2e\-docker\-iceberg.sh
+  K2I_E2E_LOAD_MESSAGES=100000 scripts/e2e\-docker\-iceberg\-load.sh
+
+The Iceberg load E2E validates real REST metadata and DuckDB iceberg_scan over
+100,000 rows by default.
+.SH VERSION
+v0.2.0

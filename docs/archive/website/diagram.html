@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>K2I Architecture Diagram</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #fafafa;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 40px 20px;
+    }
+
+    .diagram-container {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0;
+    }
+
+    /* Boxes */
+    .box {
+      border: 1px solid #d1d5db;
+      border-radius: 8px;
+      padding: 16px 32px;
+      background: white;
+      text-align: center;
+      position: relative;
+    }
+
+    .box-label {
+      font-size: 14px;
+      font-weight: 600;
+      color: #1f2937;
+    }
+
+    .box-sublabel {
+      font-size: 12px;
+      color: #6b7280;
+      margin-top: 4px;
+    }
+
+    /* Connector lines */
+    .connector {
+      width: 1px;
+      height: 32px;
+      background: #d1d5db;
+    }
+
+    .connector-short {
+      height: 20px;
+    }
+
+    /* Flow label */
+    .flow-label {
+      font-size: 11px;
+      color: #9ca3af;
+      padding: 8px 0;
+      font-style: italic;
+    }
+
+    /* Arrow */
+    .arrow {
+      width: 0;
+      height: 0;
+      border-left: 6px solid transparent;
+      border-right: 6px solid transparent;
+      border-top: 8px solid #d1d5db;
+    }
+
+    /* K2I Engine Box - Main container */
+    .k2i-section {
+      display: flex;
+      align-items: center;
+      gap: 24px;
+    }
+
+    .k2i-box {
+      border: 1px solid #1f2937;
+      border-radius: 12px;
+      padding: 24px 40px;
+      background: white;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 16px;
+      min-width: 280px;
+    }
+
+    .k2i-title {
+      font-size: 24px;
+      font-weight: 700;
+      color: #1f2937;
+      letter-spacing: -0.5px;
+    }
+
+    /* Hot Buffer inner box */
+    .hot-buffer {
+      border: 1px dashed #9ca3af;
+      border-radius: 6px;
+      padding: 12px 24px;
+      text-align: center;
+    }
+
+    .hot-buffer-label {
+      font-size: 13px;
+      font-weight: 600;
+      color: #374151;
+    }
+
+    .hot-buffer-sublabel {
+      font-size: 11px;
+      color: #6b7280;
+      margin-top: 2px;
+    }
+
+    .flush-label {
+      font-size: 11px;
+      color: #9ca3af;
+      font-style: italic;
+    }
+
+    /* Side annotations */
+    .annotations {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      align-items: flex-end;
+    }
+
+    .annotation {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .annotation-text {
+      font-size: 12px;
+      font-weight: 500;
+      color: #6b7280;
+      text-align: right;
+    }
+
+    .annotation-arrow {
+      color: #9ca3af;
+      font-size: 14px;
+    }
+
+    /* Iceberg output */
+    .iceberg-box {
+      border: 1px solid #d1d5db;
+      border-radius: 8px;
+      padding: 20px 40px;
+      background: white;
+      text-align: center;
+    }
+
+    .iceberg-label {
+      font-size: 15px;
+      font-weight: 600;
+      color: #1f2937;
+    }
+
+    .iceberg-sublabel {
+      font-size: 12px;
+      color: #6b7280;
+      margin-top: 4px;
+    }
+
+    /* Dark theme variant */
+    .dark {
+      background: #111827;
+    }
+
+    .dark .box,
+    .dark .k2i-box,
+    .dark .iceberg-box {
+      background: #1f2937;
+      border-color: #374151;
+    }
+
+    .dark .box-label,
+    .dark .k2i-title,
+    .dark .iceberg-label,
+    .dark .hot-buffer-label {
+      color: #f9fafb;
+    }
+
+    .dark .box-sublabel,
+    .dark .flow-label,
+    .dark .iceberg-sublabel,
+    .dark .hot-buffer-sublabel,
+    .dark .flush-label,
+    .dark .annotation-text {
+      color: #9ca3af;
+    }
+
+    .dark .connector,
+    .dark .hot-buffer {
+      border-color: #4b5563;
+      background: transparent;
+    }
+
+    .dark .arrow {
+      border-top-color: #4b5563;
+    }
+
+    .dark .k2i-box {
+      border-color: #f9fafb;
+    }
+  </style>
+</head>
+<body>
+  <!-- Light theme version -->
+  <div class="diagram-container">
+
+    <!-- Apache Kafka -->
+    <div class="box">
+      <div class="box-label">Apache Kafka</div>
+    </div>
+
+    <div class="connector"></div>
+
+    <div class="flow-label">(stream events)</div>
+
+    <div class="connector-short connector"></div>
+    <div class="arrow"></div>
+
+    <!-- K2I Section with annotations -->
+    <div class="k2i-section">
+
+      <!-- Left side annotations -->
+      <div class="annotations">
+        <div class="annotation">
+          <span class="annotation-text">RUST ENGINE</span>
+          <span class="annotation-arrow">→</span>
+        </div>
+        <div class="annotation" style="margin-top: 20px;">
+          <span class="annotation-text">&lt; 1 sec<br>queries</span>
+          <span class="annotation-arrow">→</span>
+        </div>
+      </div>
+
+      <!-- K2I Box -->
+      <div class="k2i-box">
+        <div class="k2i-title">K2I</div>
+
+        <div class="hot-buffer">
+          <div class="hot-buffer-label">Hot Buffer</div>
+          <div class="hot-buffer-sublabel">(Arrow)</div>
+        </div>
+
+        <div class="connector-short connector"></div>
+
+        <div class="flush-label">(flush to disk)</div>
+      </div>
+
+    </div>
+
+    <div class="connector"></div>
+    <div class="arrow"></div>
+
+    <!-- Iceberg Tables -->
+    <div class="iceberg-box">
+      <div class="iceberg-label">Iceberg Tables</div>
+      <div class="iceberg-sublabel">(Parquet on S3)</div>
+    </div>
+
+  </div>
+
+</body>
+</html>

@@ -7,6 +7,7 @@ WORKDIR /build
 # Install dependencies for rdkafka (librdkafka requires cmake)
 RUN apt-get update && apt-get install -y \
     cmake \
+    libsqlite3-dev \
     libssl-dev \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
@@ -23,6 +24,7 @@ FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y \
     ca-certificates \
+    libsqlite3-0 \
     libssl3 \
     curl \
     && rm -rf /var/lib/apt/lists/*

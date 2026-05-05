@@ -120,8 +120,11 @@ pub struct TableMetadata {
     /// Last column ID assigned
     #[serde(rename = "last-column-id")]
     pub last_column_id: i32,
-    /// Table schema (current)
-    pub schema: Schema,
+    /// Table schema (current).
+    ///
+    /// Some REST catalogs return only `schemas` plus `current-schema-id`.
+    #[serde(default)]
+    pub schema: Option<Schema>,
     /// All schemas (version history)
     #[serde(default)]
     pub schemas: Vec<Schema>,
@@ -155,6 +158,19 @@ pub struct TableMetadata {
     /// Default sort order ID
     #[serde(rename = "default-sort-order-id")]
     pub default_sort_order_id: i32,
+}
+
+impl TableMetadata {
+    /// Return the current table schema from either the legacy top-level
+    /// `schema` field or the spec `schemas` list.
+    pub fn current_schema(&self) -> Option<&Schema> {
+        self.schema.as_ref().or_else(|| {
+            self.schemas
+                .iter()
+                .find(|schema| schema.schema_id == self.current_schema_id)
+                .or_else(|| self.schemas.last())
+        })
+    }
 }
 
 /// Iceberg schema.
@@ -642,6 +658,40 @@ mod tests {
         let json = serde_json::to_string_pretty(&request).unwrap();
         assert!(json.contains("requirements"));
         assert!(json.contains("updates"));
+    }
+
+    #[test]
+    fn test_schema_update_commit_request_serialization() {
+        let request = CommitTableRequest {
+            identifier: None,
+            requirements: vec![TableRequirement::AssertCurrentSchemaId {
+                current_schema_id: 1,
+            }],
+            updates: vec![
+                TableUpdate::AddSchema {
+                    schema: Schema {
+                        schema_id: 2,
+                        r#type: "struct".to_string(),
+                        fields: vec![SchemaField {
+                            id: 3,
+                            name: "team".to_string(),
+                            field_type: serde_json::json!("string"),
+                            required: false,
+                            doc: Some("Auto-added".to_string()),
+                        }],
+                        identifier_field_ids: vec![],
+                    },
+                    last_column_id: Some(3),
+                },
+                TableUpdate::SetCurrentSchema { schema_id: 2 },
+            ],
+        };
+
+        let json = serde_json::to_string_pretty(&request).unwrap();
+        assert!(json.contains("assert-current-schema-id"));
+        assert!(json.contains("add-schema"));
+        assert!(json.contains("set-current-schema"));
+        assert!(json.contains("last-column-id"));
     }
 
     #[test]

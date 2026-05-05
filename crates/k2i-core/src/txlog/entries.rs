@@ -175,6 +175,49 @@ pub enum TransactionEntry {
         committed_at: DateTime<Utc>,
     },
 
+    /// Data file made visible to read-state clients.
+    DataFileCommitted {
+        /// Minimum table-scoped read LSN represented by the file.
+        #[serde(default)]
+        min_lsn: u64,
+        /// Table-scoped read LSN at which the file became visible.
+        read_lsn: u64,
+        /// Database name.
+        database: String,
+        /// Table name.
+        table: String,
+        /// Kafka topic.
+        topic: String,
+        /// Kafka partition.
+        partition: i32,
+        /// Minimum Kafka offset in the file.
+        min_offset: i64,
+        /// Maximum Kafka offset in the file.
+        max_offset: i64,
+        /// Iceberg snapshot ID.
+        snapshot_id: i64,
+        /// Absolute local path or object-store URI.
+        file_path: String,
+        /// File size in bytes.
+        file_size_bytes: u64,
+        /// Number of rows in the file.
+        row_count: u64,
+        /// Timestamp.
+        timestamp: DateTime<Utc>,
+    },
+
+    /// Table registration reset for read-state clients and local catalog state.
+    TableReset {
+        /// Database name.
+        database: String,
+        /// Table name.
+        table: String,
+        /// Whether table data files were intentionally retained.
+        keep_data: bool,
+        /// Timestamp.
+        timestamp: DateTime<Utc>,
+    },
+
     /// Schema evolution event
     ///
     /// Records schema changes for auditing and debugging.
@@ -242,6 +285,8 @@ impl TransactionEntry {
             TransactionEntry::CatalogHealthCheck { timestamp, .. } => *timestamp,
             TransactionEntry::CatalogError { timestamp, .. } => *timestamp,
             TransactionEntry::IdempotencyRecord { committed_at, .. } => *committed_at,
+            TransactionEntry::DataFileCommitted { timestamp, .. } => *timestamp,
+            TransactionEntry::TableReset { timestamp, .. } => *timestamp,
             TransactionEntry::SchemaEvolution { timestamp, .. } => *timestamp,
         }
     }
@@ -324,6 +369,7 @@ impl TransactionEntry {
                 ..
             } => Some(*iceberg_snapshot_id),
             TransactionEntry::IdempotencyRecord { snapshot_id, .. } => Some(*snapshot_id),
+            TransactionEntry::DataFileCommitted { snapshot_id, .. } => Some(*snapshot_id),
             _ => None,
         }
     }

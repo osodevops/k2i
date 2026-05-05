@@ -1,0 +1,71 @@
+[kafka]
+bootstrap_servers = ["kafka:29092"]
+topic = "f1.timing.derived_state"
+consumer_group = "k2i-e2e-iceberg-load"
+batch_size = 1000
+batch_timeout_ms = 200
+session_timeout_ms = 30000
+heartbeat_interval_ms = 3000
+max_poll_interval_ms = 300000
+auto_offset_reset = "earliest"
+
+[kafka.format]
+type = "protobuf"
+schema_registry_url = "http://schema-registry:8081"
+subject_strategy = "topic_name"
+message_type = "f1.timing.v1.DerivedState"
+cache_ttl_seconds = 300
+latest_on_startup = true
+
+[kafka.security]
+
+[schema_evolution]
+mode = "auto-additive"
+on_breaking_change = "pause"
+schema_update_min_interval_seconds = 1
+
+[iceberg]
+catalog_type = "rest"
+rest_uri = "http://iceberg-rest:8181"
+warehouse_path = "/var/lib/k2i/warehouse"
+database_name = "f1"
+table_name = "derived_state"
+target_file_size_mb = 512
+compression = "snappy"
+
+[buffer]
+ttl_seconds = 3600
+max_size_mb = 512
+flush_interval_seconds = 60
+flush_batch_size = 5000
+memory_alignment_bytes = 64
+
+[transaction_log]
+log_dir = "/var/lib/k2i/txlog"
+checkpoint_interval_entries = 10000
+checkpoint_interval_seconds = 300
+max_log_files = 10
+
+[maintenance]
+compaction_enabled = false
+compaction_interval_seconds = 3600
+compaction_threshold_mb = 100
+compaction_target_mb = 512
+snapshot_expiration_enabled = false
+snapshot_retention_days = 7
+orphan_cleanup_enabled = false
+orphan_retention_days = 3
+
+[monitoring]
+metrics_port = 9090
+health_port = 8080
+log_level = "info"
+log_format = "json"
+
+[rpc]
+enabled = true
+socket_path = "/var/run/k2i/k2i.sock"
+read_timeout_ms = 5000
+max_concurrent_scans = 64
+scan_ttl_seconds = 300
+max_frame_bytes = 67108864

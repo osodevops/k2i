@@ -67,6 +67,13 @@ impl CatalogManager {
                     )));
                 }
             }
+            CatalogType::Sql => {
+                if config.sql_catalog.is_none() {
+                    return Err(Error::Iceberg(IcebergError::CatalogConnection(
+                        "SQL catalog requires sql_catalog to be configured".into(),
+                    )));
+                }
+            }
         }
 
         info!(
@@ -182,6 +189,8 @@ mod tests {
             rest: Default::default(),
             glue: Default::default(),
             nessie: None,
+            sql_catalog: None,
+            object_store: Default::default(),
         }
     }
 

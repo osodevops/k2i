@@ -1,0 +1,129 @@
+services:
+  kafka:
+    image: confluentinc/cp-kafka:7.7.1
+    hostname: kafka
+    environment:
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_LISTENERS: PLAINTEXT://kafka:29092,CONTROLLER://kafka:29093,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    ports:
+      - "19092:9092"
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "kafka:29092", "--list"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.7.1
+    hostname: schema-registry
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka:29092
+    ports:
+      - "18081:8081"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8081/subjects"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  kafka-init:
+    image: confluentinc/cp-kafka:7.7.1
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      K2I_E2E_TOPIC: f1.timing.derived_state
+      K2I_E2E_PARTITIONS: "1"
+    command:
+      - bash
+      - -lc
+      - |
+        kafka-topics --bootstrap-server kafka:29092 \
+          --create --if-not-exists \
+          --topic "$$K2I_E2E_TOPIC" \
+          --partitions "$$K2I_E2E_PARTITIONS" \
+          --replication-factor 1
+
+  schema-init:
+    build:
+      context: ../..
+      dockerfile: docker/e2e/runner.Dockerfile
+    depends_on:
+      schema-registry:
+        condition: service_healthy
+    environment:
+      K2I_E2E_MODE: schema-init
+      K2I_E2E_SCHEMA_REGISTRY: http://schema-registry:8081
+
+  k2i:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    user: "0:0"
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      schema-init:
+        condition: service_completed_successfully
+      schema-registry:
+        condition: service_healthy
+    environment:
+      RUST_LOG: info
+    volumes:
+      - ./k2i.e2e.toml:/etc/k2i/config.toml:ro
+      - k2i-warehouse:/var/lib/k2i/warehouse
+      - k2i-txlog:/var/lib/k2i/txlog
+      - k2i-run:/var/run/k2i
+    ports:
+      - "18080:8080"
+      - "19090:9090"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+
+  e2e-runner:
+    build:
+      context: ../..
+      dockerfile: docker/e2e/runner.Dockerfile
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+      k2i:
+        condition: service_healthy
+    environment:
+      K2I_E2E_KAFKA_BOOTSTRAP: kafka:29092
+      K2I_E2E_SCHEMA_REGISTRY: http://schema-registry:8081
+      K2I_E2E_HEALTH_URL: http://k2i:8080
+      K2I_E2E_METRICS_URL: http://k2i:9090
+      K2I_E2E_RPC_SOCKET: /var/run/k2i/k2i.sock
+      K2I_E2E_TOPIC: f1.timing.derived_state
+      RUST_LOG: info
+    volumes:
+      - k2i-warehouse:/var/lib/k2i/warehouse
+      - k2i-run:/var/run/k2i
+
+volumes:
+  k2i-warehouse:
+  k2i-txlog:
+  k2i-run:

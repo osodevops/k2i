@@ -1,0 +1,17 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH k2i-validate 1  "k2i-validate "
+.SH NAME
+k2i\-validate \- Validate configuration file
+.SH SYNOPSIS
+\fBk2i\-validate\fR [\fB\-h\fR|\fB\-\-help\fR]
+.SH DESCRIPTION
+Validate configuration file
+.SH OPTIONS
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.SH EXTRA
+EXAMPLES:
+  k2i validate \-\-config config.toml
+  k2i validate \-\-config /etc/k2i/production.toml

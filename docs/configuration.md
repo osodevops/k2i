@@ -2,6 +2,8 @@
 
 K2I uses TOML configuration files. This document describes all available configuration options.
 
+Use this page as the source of truth for runtime configuration. For feature-specific behavior, see [Schema Registry Protobuf](./schema-registry-protobuf.md), [Iceberg REST Catalog](./iceberg-rest-catalog.md), and [Production Readiness](./production-readiness.md).
+
 ## Configuration File Location
 
 By default, K2I looks for `config.toml` in the current directory. Override with:
@@ -24,6 +26,18 @@ heartbeat_interval_ms = 3000
 max_poll_interval_ms = 300000
 auto_offset_reset = "earliest"
 
+[kafka.format]
+type = "raw"
+
+# Protobuf example:
+# [kafka.format]
+# type = "protobuf"
+# schema_registry_url = "http://localhost:8081"
+# subject_strategy = "topic_name"
+# message_type = "example.events.v1.Event"
+# cache_ttl_seconds = 300
+# latest_on_startup = true
+
 [kafka.security]
 protocol = "SASL_SSL"
 sasl_mechanism = "SCRAM-SHA-256"
@@ -32,6 +46,11 @@ sasl_password = "password"
 ssl_ca_location = "/path/to/ca.pem"
 ssl_cert_location = "/path/to/cert.pem"
 ssl_key_location = "/path/to/key.pem"
+
+[schema_evolution]
+mode = "auto-additive"
+on_breaking_change = "pause"
+schema_update_min_interval_seconds = 60
 
 [iceberg]
 catalog_type = "rest"
@@ -78,6 +97,14 @@ metrics_port = 9090
 health_port = 8080
 log_level = "info"
 log_format = "json"
+
+[rpc]
+enabled = false
+socket_path = "./run/k2i.sock"
+read_timeout_ms = 1000
+max_concurrent_scans = 64
+scan_ttl_seconds = 300
+max_frame_bytes = 67108864
 ```
 
 ---
@@ -103,6 +130,35 @@ log_format = "json"
 - `max_poll_interval_ms` must exceed the longest possible flush time to avoid consumer group rebalances
 - `session_timeout_ms` should be at least 3x `heartbeat_interval_ms`
 - Use `earliest` to process all historical data, `latest` for new messages only
+
+### [kafka.format]
+
+Controls how Kafka values are decoded before they enter the hot buffer and Parquet writer.
+
+| Option | Type | Required | Default | Description |
+|--------|------|----------|---------|-------------|
+| `type` | String | No | `"raw"` | Payload format: `raw`, `json`, or `protobuf` |
+| `schema_registry_url` | String | Protobuf only | - | Confluent Schema Registry base URL |
+| `subject_strategy` | String | No | `"topic_name"` | Protobuf subject strategy: `topic_name`, `record_name`, `topic_record_name` |
+| `message_type` | String | Conditional | - | Fully-qualified Protobuf message type |
+| `cache_ttl_seconds` | Integer | No | 300 | In-memory Schema Registry cache TTL |
+| `latest_on_startup` | Boolean | No | true | Resolve the latest subject schema during startup |
+
+`raw` stores Kafka key/value bytes with Kafka metadata columns. `json` currently uses the same raw decoder in the ingestion loop. `protobuf` expects Confluent-framed Protobuf values with the magic byte, schema ID, message indexes, and payload.
+
+For `record_name` and `topic_record_name`, `message_type` is required. It is also required when a Protobuf schema contains more than one non-map-entry message type. K2I stores a stale Schema Registry disk cache under `<transaction_log.log_dir>/schema-cache` so recent schemas can still be resolved during short registry outages.
+
+Example:
+
+```toml
+[kafka.format]
+type = "protobuf"
+schema_registry_url = "http://schema-registry:8081"
+subject_strategy = "topic_name"
+message_type = "example.events.v1.Event"
+cache_ttl_seconds = 300
+latest_on_startup = true
+```
 
 ### [kafka.security]
 
@@ -136,6 +192,24 @@ Optional section for authenticated Kafka clusters.
 | `SCRAM-SHA-512` | Stronger variant of SCRAM |
 
 > **Kerberos (GSSAPI):** Kerberos authentication is not included in the default build. To enable it, you must build k2i from source with the `gssapi` feature. See [Building with Kerberos Support](#building-with-kerberos-support) below.
+
+---
+
+## Schema Evolution Configuration
+
+### [schema_evolution]
+
+Controls runtime behavior when decoded Protobuf schemas differ from the current table schema.
+
+| Option | Type | Required | Default | Description |
+|--------|------|----------|---------|-------------|
+| `mode` | String | No | `"auto-additive"` | Evolution policy: `manual`, `auto-additive`, or `permissive` |
+| `on_breaking_change` | String | No | `"pause"` | Breaking-change policy: `pause`, `fail`, or `skip-message` |
+| `schema_update_min_interval_seconds` | Integer | No | 60 | Minimum interval between schema update commits |
+
+In `auto-additive` mode, K2I automatically adds nullable fields that appear in new Protobuf schemas. Type changes, removed fields, required-field additions, and incompatible field changes are breaking. Breaking changes block `/readyz`; `pause` keeps the process alive for operator intervention, while `fail` marks schema health unhealthy. `skip-message` currently pauses instead of skipping so Kafka offsets are not advanced past incompatible data.
+
+Use `manual` when an operator or deployment pipeline owns table schema changes. In manual mode, additive changes also pause ingestion until the table schema is updated.
 
 ---
 
@@ -187,12 +261,12 @@ Optional section for authenticated Kafka clusters.
 
 #### Warehouse Path Formats
 
-| Storage | Format |
-|---------|--------|
-| AWS S3 | `s3://bucket-name/path/` |
-| Google Cloud Storage | `gs://bucket-name/path/` |
-| Azure Blob Storage | `az://container/path/` |
-| Local Filesystem | `file:///absolute/path/` |
+| Storage | Format | Current writer status |
+|---------|--------|-----------------------|
+| AWS S3 / S3-compatible | `s3://bucket-name/path/` | Supported path; validate credentials and endpoint in your environment |
+| Local filesystem | `file:///absolute/path/` | Supported for local development and tests |
+| Google Cloud Storage | `gs://bucket-name/path/` | Declared in configuration, but writer creation still needs backend wiring |
+| Azure Blob Storage | `az://container/path/` | Declared in configuration, but writer creation still needs backend wiring |
 
 ### [[iceberg.partition_spec]]
 
@@ -277,10 +351,11 @@ Set `memory_alignment_bytes` to match your CPU's SIMD width:
 
 #### Notes
 
-- Transaction log enables exactly-once semantics and crash recovery
+- Transaction log records are part of K2I's exactly-once-style durability design
 - Checkpoints create snapshots of system state for faster recovery
 - Log files are automatically rotated based on entry count or time
 - Each entry includes CRC32 checksum for integrity verification
+- Entries are flushed, but not every entry is fsynced individually; see [Production Readiness](./production-readiness.md)
 
 ---
 
@@ -290,13 +365,13 @@ Set `memory_alignment_bytes` to match your CPU's SIMD width:
 
 | Option | Type | Required | Default | Description |
 |--------|------|----------|---------|-------------|
-| `compaction_enabled` | Boolean | No | true | Enable automatic compaction |
+| `compaction_enabled` | Boolean | No | true | Enable compaction task behavior |
 | `compaction_interval_seconds` | Integer | No | 3600 | Compaction run interval |
 | `compaction_threshold_mb` | Integer | No | 100 | Files smaller than this are compaction candidates |
 | `compaction_target_mb` | Integer | No | 512 | Target size for compacted files |
-| `snapshot_expiration_enabled` | Boolean | No | true | Enable snapshot expiration |
+| `snapshot_expiration_enabled` | Boolean | No | true | Enable snapshot expiration task behavior |
 | `snapshot_retention_days` | Integer | No | 7 | Keep snapshots for N days |
-| `orphan_cleanup_enabled` | Boolean | No | true | Enable orphan file cleanup |
+| `orphan_cleanup_enabled` | Boolean | No | true | Enable orphan file cleanup task behavior |
 | `orphan_retention_days` | Integer | No | 3 | Safety buffer before deleting orphans |
 
 #### Compaction
@@ -304,7 +379,7 @@ Set `memory_alignment_bytes` to match your CPU's SIMD width:
 Compaction merges small Parquet files into larger ones for better query performance:
 - Files smaller than `compaction_threshold_mb` are candidates
 - Multiple files are merged until reaching `compaction_target_mb`
-- Runs automatically every `compaction_interval_seconds`
+- Scheduler wiring should be reviewed for each deployment before relying on unattended maintenance
 
 #### Snapshot Expiration
 
@@ -312,6 +387,7 @@ Removes old Iceberg snapshots:
 - Keeps snapshots younger than `snapshot_retention_days`
 - Reduces metadata bloat
 - Does not delete data files still referenced by other snapshots
+- Scheduler wiring should be reviewed for each deployment before relying on unattended expiration
 
 #### Orphan Cleanup
 
@@ -319,6 +395,7 @@ Removes unreferenced data files:
 - Files not referenced by any snapshot
 - Must be older than `orphan_retention_days` (safety buffer)
 - Prevents storage cost from abandoned files
+- Scheduler wiring should be reviewed for each deployment before relying on unattended cleanup
 
 ---
 
@@ -349,6 +426,25 @@ Removes unreferenced data files:
 |--------|-------------|
 | `json` | Structured JSON logs (recommended for production) |
 | `text` | Human-readable text logs (recommended for development) |
+
+---
+
+## RPC Configuration
+
+### [rpc]
+
+Controls the optional Unix socket read-state RPC server used by local readers that need a consistent hot/cold table view.
+
+| Option | Type | Required | Default | Description |
+|--------|------|----------|---------|-------------|
+| `enabled` | Boolean | No | false | Start the local read-state RPC server |
+| `socket_path` | String | No | `"./run/k2i.sock"` | Unix socket path |
+| `read_timeout_ms` | Integer | No | 1000 | Maximum wait for requested read state |
+| `max_concurrent_scans` | Integer | No | 64 | Maximum pinned scans |
+| `scan_ttl_seconds` | Integer | No | 300 | TTL for abandoned scans |
+| `max_frame_bytes` | Integer | No | 67108864 | Maximum RPC frame size |
+
+The v1 protocol exposes `Health`, `ListTables`, `GetTableSchema`, `ScanTableBegin`, and `ScanTableEnd`. `ScanTableBegin` returns committed Parquet file references plus hot Arrow IPC bytes for rows not yet visible in cold storage. Clients must call `ScanTableEnd` to release scan pins.
 
 ---
 
@@ -395,8 +491,11 @@ k2i validate --config config.toml
 Common validation checks:
 - Required fields are present
 - Kafka bootstrap servers are non-empty
+- Protobuf Schema Registry settings are valid when `kafka.format.type = "protobuf"`
 - Iceberg catalog type is valid
 - Memory alignment is a power of 2
+- RPC scan/frame limits are greater than zero
+- Schema update interval is greater than zero
 - Port numbers are in valid range
 - Paths are accessible
 

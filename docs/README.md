@@ -1,88 +1,60 @@
 # K2I Documentation
 
-K2I (Kafka to Iceberg) is a production-grade streaming ingestion engine that bridges the latency-cost trade-off in data pipelines. It consumes events from Apache Kafka, buffers them in-memory with Apache Arrow for sub-second query freshness, and writes them to Apache Iceberg tables in Parquet format.
+K2I is a standalone Rust service for Kafka-to-Apache-Iceberg ingestion. It consumes a configured Kafka topic, decodes raw or Confluent-framed Protobuf messages, keeps recent rows visible through an Arrow-backed local read path, and writes Parquet data files through Iceberg catalog commits.
 
-## Overview
+The current release docs are organized around the working implementation and local verification flows. Historical PRDs, research notes, and older website drafts live under [archive](./archive/).
 
-K2I is a single-process, embedded Rust application inspired by the Moonlink architecture from pg_mooncake. It provides:
+## Start Here
 
-- **Sub-second data freshness** via in-memory hot buffer
-- **Cost-efficient analytics** through Iceberg's columnar format
-- **Exactly-once semantics** with transaction log recovery
-- **Automatic maintenance** including compaction, snapshot expiration, and orphan cleanup
+| Guide | Use It For |
+|---|---|
+| [Kafka to Iceberg](./kafka-to-iceberg.md) | Main explanation of the K2I data path |
+| [Quickstart](./quickstart.md) | Local Docker proof and first manual run |
+| [Configuration](./configuration.md) | Complete TOML reference |
+| [Architecture](./architecture.md) | System design, ordering, and hot/cold visibility |
+| [Comparisons](./comparisons.md) | K2I vs Kafka Connect, Flink, Spark, TableFlow, and Moonlink |
+| [FAQ](./faq.md) | Short answers for common user questions |
 
-## Key Features
+## Implementation Deep Dives
 
-| Feature | Description |
-|---------|-------------|
-| Hot Buffer | Arrow-based in-memory storage with hash indexes for O(1) lookups |
-| Iceberg Writer | Atomic commits with support for REST, Hive, Glue, and Nessie catalogs |
-| Transaction Log | Append-only log for crash recovery and exactly-once semantics |
-| Backpressure | Smart consumer that pauses when buffer is full |
-| Circuit Breaker | Fault tolerance for catalog operations |
-| Prometheus Metrics | Full observability with counters, gauges, and histograms |
+| Guide | Use It For |
+|---|---|
+| [DuckDB Iceberg Validation](./duckdb-iceberg-validation.md) | Docker E2E, direct Parquet reads, and DuckDB `iceberg_scan` |
+| [Schema Registry Protobuf](./schema-registry-protobuf.md) | Confluent Protobuf decoding and schema evolution behavior |
+| [Iceberg REST Catalog](./iceberg-rest-catalog.md) | REST catalog commits and catalog backend caveats |
+| [Commands](./commands.md) | CLI command reference and E2E scripts |
+| [Man Pages](./man/man1/k2i.1) | Generated man pages for every CLI command and subcommand |
+| [Deployment](./deployment.md) | Deployment patterns and operational notes |
+| [Troubleshooting](./troubleshooting.md) | Common issues and recovery guidance |
+| [Production Readiness](./production-readiness.md) | Verification status, caveats, and follow-up issues |
 
-## Documentation
-
-| Guide | Description |
-|-------|-------------|
-| [Whitepaper](./whitepaper.md) | Comprehensive technical whitepaper |
-| [Quickstart](./quickstart.md) | Get K2I running in 5 minutes |
-| [Configuration](./configuration.md) | Complete configuration reference |
-| [Architecture](./architecture.md) | System design and internals |
-| [Commands](./commands.md) | CLI command reference |
-| [Deployment](./deployment.md) | Production deployment guide |
-| [Troubleshooting](./troubleshooting.md) | Common issues and solutions |
-
-## Quick Example
+## Quick Local Proof
 
 ```bash
-# Validate configuration
-k2i validate --config config.toml
+# Correctness flow: Protobuf evolution, read-state RPC, DuckDB Parquet checks
+scripts/e2e-docker.sh
 
-# Start ingestion
-k2i ingest --config config.toml
+# Real Iceberg REST metadata and DuckDB iceberg_scan
+scripts/e2e-docker-iceberg.sh
 
-# Check status
-k2i status --url http://localhost:8080
-
-# Run manual compaction
-k2i maintenance compact --config config.toml
+# 100,000-row Iceberg load profile
+K2I_E2E_LOAD_MESSAGES=100000 scripts/e2e-docker-iceberg-load.sh
 ```
 
-## Architecture Overview
+The Iceberg E2E success line is:
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    K2I Ingestion Engine                     │
-├─────────────────────────────────────────────────────────────┤
-│  ┌──────────────┐  ┌────────────┐  ┌──────────────────────┐ │
-│  │ Kafka        │  │ Hot Buffer │  │ Iceberg Writer       │ │
-│  │ Consumer     │→ │ (Arrow +   │→ │ (Parquet + Catalog)  │ │
-│  │ (rdkafka)    │  │ DashMap)   │  │                      │ │
-│  └──────────────┘  └────────────┘  └──────────────────────┘ │
-│         ↓                ↓                    ↓              │
-│  ┌─────────────────────────────────────────────────────┐    │
-│  │ Transaction Log (crash recovery, exactly-once)      │    │
-│  └─────────────────────────────────────────────────────┘    │
-│         ↓                                                    │
-│  ┌─────────────────────────────────────────────────────┐    │
-│  │ HTTP Servers: /health /healthz /readyz /metrics     │    │
-│  └─────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────┘
+```text
+ok: DuckDB iceberg_scan validated real Iceberg metadata
 ```
 
-## Requirements
+## Current Release Scope
 
-- Rust 1.75 or later (for building from source)
-- Apache Kafka 2.8+
-- Iceberg-compatible catalog (REST, Hive, AWS Glue, or Nessie)
-- Object storage (S3, GCS, Azure Blob, or local filesystem)
+K2I is production-oriented, but the docs intentionally keep caveats visible:
 
-## License
+- one configured Kafka topic and one configured Iceberg table per process today;
+- REST catalog real-metadata path validated locally; Glue, Hive, and Nessie abstractions require backend-specific validation;
+- hot reads are local read-state RPC, while query engines see data after an Iceberg commit;
+- exactly-once-style durability is designed around manual Kafka offsets, transaction-log records, idempotency records, immutable Parquet writes, and atomic Iceberg commits;
+- multi-partition hardening, startup recovery application, async Kafka commit acknowledgement, per-entry fsync behavior, GCS/Azure writer wiring, and maintenance scheduler wiring remain production follow-ups.
 
-Apache 2.0
-
-## Support
-
-For issues and feature requests, visit: https://github.com/osodevops/k2i
+See [Production Readiness](./production-readiness.md) before broad rollout.

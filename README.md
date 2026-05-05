@@ -1,7 +1,7 @@
 <p align="center">
-  <h1 align="center">K2I</h1>
+  <h1 align="center">K2I: Kafka to Apache Iceberg in One Rust Binary</h1>
   <p align="center">
-    High-performance streaming ingestion from Kafka to Apache Iceberg
+    Stream final-form Kafka events into Apache Iceberg tables with Protobuf Schema Registry decoding, Arrow hot reads, Parquet writes, and Docker-verified DuckDB/Iceberg validation.
   </p>
 </p>
 
@@ -19,43 +19,130 @@
 
 ---
 
-**K2I** (Kafka to Iceberg) is a production-grade streaming ingestion engine written in Rust that bridges the latency-cost trade-off in data pipelines. It consumes events from Apache Kafka, buffers them in-memory using Apache Arrow for **sub-second query freshness**, and writes them to Apache Iceberg tables in Parquet format with **exactly-once semantics**.
+**K2I** is an open-source, standalone Kafka-to-Iceberg ingestion engine written in Rust. It consumes a Kafka topic, decodes raw or Confluent-framed Protobuf messages, keeps recent rows visible through an Arrow-backed local read path, and flushes Parquet data files through Iceberg catalog commits.
 
-## Features
+K2I is built for teams that want fresh lakehouse tables without operating a Flink job, Spark micro-batch pipeline, or Kafka Connect cluster for a simple final-form event stream. One process owns one configured Kafka topic and one configured Iceberg table today.
 
-- **Sub-second data freshness** - In-memory hot buffer with Arrow columnar storage
-- **Exactly-once semantics** - Write-ahead transaction log for crash recovery
-- **Multiple catalog backends** - REST, Hive Metastore, AWS Glue, Nessie
-- **Smart backpressure** - Automatic consumer pausing when buffer is full
-- **Automated maintenance** - Compaction, snapshot expiration, orphan cleanup
-- **Production observability** - Prometheus metrics, health endpoints, structured logging
-- **Single-process simplicity** - No distributed coordination overhead
+## Use K2I When
+
+- You have final-form Kafka events that should become analytics rows in Apache Iceberg.
+- You want a single Rust service/container instead of a stream-processing cluster for this ingestion job.
+- You need local fresh-read visibility before the next Iceberg snapshot is committed.
+- You use Confluent Schema Registry Protobuf and want additive schema evolution guarded by readiness checks.
+- You want local Docker E2E validation that proves the written Iceberg table is readable by DuckDB.
+
+K2I is not a general stream processing framework. Use Flink or another stream processor for joins, windows, stateful transformations, multi-source ETL, or complex CDC delete/update semantics.
+
+## Quick Local Proof
+
+Run the real Iceberg/DuckDB flow locally:
+
+```bash
+scripts/e2e-docker-iceberg.sh
+```
+
+The script starts Kafka, Schema Registry, K2I, an Iceberg REST fixture, and the E2E runner. A passing run ends with:
+
+```text
+ok: DuckDB iceberg_scan validated real Iceberg metadata
+```
+
+Run the local Iceberg load profile with 100,000 rows:
+
+```bash
+K2I_E2E_LOAD_MESSAGES=100000 scripts/e2e-docker-iceberg-load.sh
+```
+
+## What K2I Does
+
+| Capability | Current behavior |
+|---|---|
+| Kafka ingest | Uses `rdkafka`, manual offset management, batching, retry, and backpressure |
+| Payload decoding | Raw bytes, JSON-compatible raw payloads, and Confluent-framed Protobuf |
+| Schema Registry | Resolves Protobuf descriptors, caches schemas in memory and on disk, supports subject strategies |
+| Schema evolution | Adds compatible nullable Protobuf fields and pauses readiness on breaking changes |
+| Hot reads | Exposes local read-state RPC over a Unix socket with Arrow IPC rows and committed file references |
+| Iceberg writes | Writes Parquet files and commits real Iceberg REST metadata through `iceberg-rust` |
+| Durability design | Records offsets, flushes, files, schema events, and idempotency data in an append-only transaction log |
+| Operations | HTTP health/readiness, Prometheus metrics, CLI commands, generated man pages, and Docker E2E scripts |
+
+## Architecture
+
+```mermaid
+flowchart LR
+    kafka[(Kafka topic)]
+    registry[(Schema Registry)]
+    client[Local read client]
+    metrics[Health / Metrics]
+
+    subgraph k2i[K2I Rust process]
+        consumer[Kafka consumer<br/>manual offsets + backpressure]
+        decoder[Decoder<br/>raw / Protobuf]
+        hot[Arrow hot buffer<br/>read LSNs]
+        wal[Transaction log<br/>offsets + idempotency]
+        writer[Parquet writer]
+        rpc[Read-state RPC<br/>Unix socket]
+    end
+
+    store[(Object storage<br/>Parquet data files)]
+    catalog[(Iceberg catalog<br/>REST / Glue / Hive / Nessie)]
+    engines[Query engines<br/>DuckDB / Trino / Spark]
+
+    kafka --> consumer --> decoder --> hot --> writer --> store
+    registry --> decoder
+    hot --> rpc --> client
+    decoder --> wal
+    writer --> wal
+    writer --> catalog
+    catalog --> engines
+    store --> engines
+    k2i --> metrics
+```
+
+K2I separates hot and cold visibility:
+
+```mermaid
+flowchart TB
+    record[Kafka record accepted]
+    hot[Hot path<br/>Arrow buffer + read-state RPC]
+    flush[Flush trigger<br/>time / size / count]
+    cold[Cold path<br/>Parquet + Iceberg snapshot]
+    query_hot[Local freshness reads]
+    query_cold[Lakehouse queries]
+
+    record --> hot --> query_hot
+    hot --> flush --> cold --> query_cold
+```
+
+Hot-path visibility is local and intended for co-located readers or sidecars. Cold-path visibility depends on flush thresholds, object-store writes, and Iceberg catalog commit timing.
+
+## K2I vs Alternatives
+
+| Dimension | K2I | Kafka Connect Iceberg Sink | Flink Iceberg Sink | Spark Micro-Batch | Confluent TableFlow | Moonlink |
+|---|---|---|---|---|---|---|
+| Primary fit | Final-form Kafka events to Iceberg | Connector-based ingestion | Stream processing and transforms | Batch/micro-batch ETL | Managed Confluent pipeline | Postgres CDC to Iceberg |
+| Deployment | Single Rust binary/container | Kafka Connect cluster | Flink cluster | Spark runtime | Managed service | Service/extension stack |
+| Transformations | Intentionally minimal | SMT/basic connector config | Strong | Strong | Limited/managed | CDC-focused |
+| Hot reads | Local Arrow read-state RPC | No | No native local hot path | No | No local hot path | CDC-oriented |
+| Schema path | Confluent Protobuf additive evolution | Connector/schema dependent | Engine dependent | Job dependent | Managed | CDC/schema dependent |
+| Choose when | Events are already analytics-shaped | You already run Connect | You need joins/windows/state | Batch jobs are acceptable | You use Confluent Cloud | Source is Postgres |
+
+See [comparisons](docs/comparisons.md) for the longer decision guide.
 
 ## Installation
 
 Download the latest binary from the [GitHub Releases](https://github.com/osodevops/k2i/releases) page.
 
-### macOS (Homebrew)
+### macOS
 
 ```bash
 brew install osodevops/tap/k2i
 ```
 
-### Linux / macOS (Shell Installer)
+### Linux / macOS Shell Installer
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/osodevops/k2i/releases/latest/download/k2i-cli-installer.sh | sh
-```
-
-### Linux (Manual)
-
-Download the appropriate binary for your architecture from [releases](https://github.com/osodevops/k2i/releases):
-
-```bash
-# Example for x86_64
-curl -LO https://github.com/osodevops/k2i/releases/latest/download/k2i-cli-x86_64-unknown-linux-gnu.tar.xz
-tar -xJf k2i-cli-x86_64-unknown-linux-gnu.tar.xz
-sudo mv k2i /usr/local/bin/
 ```
 
 ### Docker
@@ -64,8 +151,6 @@ sudo mv k2i /usr/local/bin/
 docker pull ghcr.io/osodevops/k2i:latest
 docker run --rm -v /path/to/config:/etc/k2i ghcr.io/osodevops/k2i:latest ingest --config /etc/k2i/config.toml
 ```
-
-See the image on [GitHub Container Registry](https://github.com/osodevops/k2i/pkgs/container/k2i).
 
 ### From Source
 
@@ -77,284 +162,172 @@ cargo build --release
 
 Binary location: `target/release/k2i`
 
+Source builds require Rust 1.75+, CMake, and OpenSSL development libraries. Kerberos/GSSAPI support is not enabled by default; if you need it, add the `gssapi` feature to `rdkafka` and install the matching SASL development libraries for your platform.
+
 ## Quick Start
 
-### 1. Create Configuration
-
-Create a configuration file `config.toml`:
+Create a minimal configuration:
 
 ```toml
 [kafka]
-bootstrap_servers = "localhost:9092"
+bootstrap_servers = ["localhost:9092"]
 topic = "events"
-group_id = "k2i-ingestion"
+consumer_group = "k2i-ingestion"
+
+[kafka.format]
+type = "raw"
+
+[schema_evolution]
+mode = "auto-additive"
+on_breaking_change = "pause"
+schema_update_min_interval_seconds = 60
 
 [buffer]
 max_size_mb = 500
 flush_interval_seconds = 30
+flush_batch_size = 10000
 
 [iceberg]
 catalog_type = "rest"
+warehouse_path = "s3://my-bucket/warehouse"
+database_name = "analytics"
+table_name = "events"
 rest_uri = "http://localhost:8181"
-warehouse = "s3://my-bucket/warehouse"
-database = "analytics"
-table = "events"
 
-[storage]
-type = "s3"
-bucket = "my-bucket"
-region = "us-east-1"
+[transaction_log]
+log_dir = "./transaction_logs"
 
-[server]
-health_port = 8080
+[monitoring]
 metrics_port = 9090
+health_port = 8080
+
+[rpc]
+enabled = false
 ```
 
-### 2. Validate Configuration
+Validate and run:
 
 ```bash
 k2i validate --config config.toml
-```
-
-### 3. Start Ingestion
-
-```bash
 k2i ingest --config config.toml
 ```
 
-### 4. Monitor Health
+Monitor:
 
 ```bash
-# Health check
+k2i status --url http://localhost:8080
 curl http://localhost:8080/health
-
-# Prometheus metrics
 curl http://localhost:9090/metrics
 ```
 
-## Why K2I?
+Use [config/example.toml](config/example.toml) and the [configuration reference](docs/configuration.md) for the complete set of options.
 
-### The Problem
+## What Is Validated
 
-Modern data architectures face a fundamental tension:
+The current implementation has been verified locally with:
 
-| Approach | Latency | Cost | Complexity |
-|----------|---------|------|------------|
-| Real-time streaming (Kafka + KSQL) | Milliseconds | High | High |
-| Micro-batch (Spark Streaming) | Seconds-Minutes | Medium | Medium |
-| Batch ETL (Airflow + Spark) | Minutes-Hours | Low | Low |
-
-Streaming data into Iceberg creates additional challenges:
-- **Small file problem** - Each micro-batch creates new files, degrading query performance
-- **Exactly-once complexity** - Coordinating Kafka, object storage, and catalog commits
-- **Operational burden** - Manual compaction, snapshot expiration, orphan cleanup
-
-### The Solution
-
-K2I resolves these trade-offs through:
-
-1. **Hot/Cold Architecture** - In-memory Arrow buffer for immediate queries, Parquet files for cost-efficient analytics
-2. **Write-Ahead Logging** - Transaction log ensures exactly-once semantics and crash recovery
-3. **Single-Process Design** - No distributed coordination, deterministic behavior, simple operations
-4. **Automated Maintenance** - Background compaction, expiration, and cleanup
-
-### Feature Comparison
-
-| Feature | K2I | Spark Streaming | Flink | Kafka Connect |
-|---------|-----|-----------------|-------|---------------|
-| Single process | Yes | No | No | Per-connector |
-| Sub-second latency | Yes | Minutes | Seconds | Seconds |
-| Exactly-once | Yes | Yes | Yes | Depends |
-| Auto compaction | Yes | No | No | No |
-| Hot buffer queries | Yes | No | No | No |
-| Memory footprint | Low | High | High | Medium |
-| Operational complexity | Low | High | High | Medium |
-
-### When NOT to Use K2I
-
-- **Complex transformations** - Use Apache Flink for stream processing with joins, aggregations
-- **Multi-source ingestion** - K2I is optimized for Kafka; use Flink for diverse sources
-- **CDC replication** - For database change data capture with deletes, consider Moonlink
-
-## Architecture
-
+```bash
+cargo fmt --all --check
+git diff --check
+cargo check --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --no-fail-fast
+cargo run -p k2i-cli -- completions man --output-dir docs/man/man1
+cargo test -p k2i-cli --test man_pages --no-fail-fast
+scripts/e2e-docker.sh
+K2I_E2E_LOAD_MESSAGES=100000 scripts/e2e-docker-load.sh
+scripts/e2e-docker-iceberg.sh
+K2I_E2E_LOAD_MESSAGES=100000 scripts/e2e-docker-iceberg-load.sh
 ```
-+-----------------------------------------------------------------------------+
-|                           K2I Ingestion Engine                              |
-+-----------------------------------------------------------------------------+
-|                                                                             |
-|   +------------------+    +------------------+    +------------------+      |
-|   | SmartKafka       |    |    Hot Buffer    |    | Iceberg Writer   |      |
-|   | Consumer         |--->| (Arrow + Index)  |--->| (Parquet)        |      |
-|   |                  |    |                  |    |                  |      |
-|   | - rdkafka        |    | - RecordBatch    |    | - Catalog        |      |
-|   | - Backpressure   |    | - DashMap Index  |    | - Object Store   |      |
-|   | - Retry Logic    |    | - TTL Eviction   |    | - Atomic Commit  |      |
-|   +------------------+    +------------------+    +------------------+      |
-|            |                       |                       |               |
-|            v                       v                       v               |
-|   +---------------------------------------------------------------------+  |
-|   |                      Transaction Log                                |  |
-|   | - Append-only entries with CRC32 checksums                          |  |
-|   | - Periodic checkpoints for fast recovery                            |  |
-|   | - Idempotency records for exactly-once semantics                    |  |
-|   +---------------------------------------------------------------------+  |
-|                                                                             |
-+-----------------------------------------------------------------------------+
-```
+
+The Docker flows cover Protobuf schema evolution, schema-pause readiness behavior, read-state RPC, direct Parquet validation with DuckDB, real Iceberg REST metadata commits, snapshot growth, and DuckDB `iceberg_scan`.
+
+## Current Release Caveats
+
+K2I is ready for a first public release as a production-oriented Kafka-to-Iceberg ingestion engine, but these areas should remain explicit follow-up items before broad production rollout:
+
+- Multi-partition flush and offset commit behavior needs continued hardening.
+- Startup recovery computes state, but Kafka seeking/deduplication and startup orphan cleanup need further wiring.
+- Kafka offset commits are async; broker durability acknowledgement is not confirmed by the current helper.
+- Transaction-log entries are flushed, but not every entry is fsynced individually.
+- GCS and Azure object-store configuration is declared, but writer creation is not complete for those backends.
+- Maintenance commands and task implementations exist; scheduler wiring should be reviewed for each deployment.
+
+See [Production Readiness](docs/production-readiness.md) for the detailed review checklist.
 
 ## Documentation
 
-| Document | Description |
-|----------|-------------|
-| [Whitepaper](docs/whitepaper.md) | Comprehensive technical whitepaper |
-| [Quick Start](docs/quickstart.md) | Get started in 5 minutes |
-| [Configuration](docs/configuration.md) | Complete configuration reference |
-| [Architecture](docs/architecture.md) | System design and internals |
+| Guide | Description |
+|---|---|
+| [Kafka to Iceberg](docs/kafka-to-iceberg.md) | Main explanation of the K2I data path |
+| [Quickstart](docs/quickstart.md) | Local proof and first manual run |
+| [Configuration](docs/configuration.md) | Complete TOML reference |
+| [Architecture](docs/architecture.md) | System design, ordering, and hot/cold reads |
+| [Comparisons](docs/comparisons.md) | K2I vs Kafka Connect, Flink, Spark, TableFlow, and Moonlink |
+| [DuckDB Iceberg Validation](docs/duckdb-iceberg-validation.md) | How local Docker E2E proves real Iceberg metadata |
+| [Schema Registry Protobuf](docs/schema-registry-protobuf.md) | Protobuf decoding and schema evolution |
+| [Iceberg REST Catalog](docs/iceberg-rest-catalog.md) | REST catalog commit path and backend caveats |
 | [Commands](docs/commands.md) | CLI command reference |
-| [Deployment](docs/deployment.md) | Production deployment guide |
-| [Troubleshooting](docs/troubleshooting.md) | Common issues and solutions |
-
-## CLI Reference
-
-```bash
-# Validate configuration
-k2i validate --config config.toml
-
-# Start ingestion
-k2i ingest --config config.toml
-
-# Check service status
-k2i status --url http://localhost:8080
-
-# Run manual compaction
-k2i maintenance compact --config config.toml
-
-# Expire old snapshots
-k2i maintenance expire-snapshots --config config.toml
-
-# Clean orphan files
-k2i maintenance cleanup-orphans --config config.toml
-```
-
-## Performance
-
-| Metric | Target | Notes |
-|--------|--------|-------|
-| Query freshness (hot) | < 1ms | In-memory Arrow buffer |
-| Query freshness (cold) | 30s | Configurable flush interval |
-| Flush latency (P50) | 200ms | End-to-end flush cycle |
-| Flush latency (P99) | 800ms | Including catalog commit |
-| Throughput | 10-100K msg/s | Configuration dependent |
-| Memory usage | 200MB - 2GB | Based on buffer size |
-
-## Catalog Support
-
-K2I supports multiple Iceberg catalog backends:
-
-| Catalog | Configuration | Features |
-|---------|---------------|----------|
-| **REST** | `catalog_type = "rest"` | OAuth2, Bearer token, custom headers |
-| **Hive Metastore** | `catalog_type = "hive"` | Thrift protocol, schema sync |
-| **AWS Glue** | `catalog_type = "glue"` | IAM roles, cross-account access |
-| **Nessie** | `catalog_type = "nessie"` | Git-like branching, time travel |
-
-## Building from Source
-
-**Requirements:**
-- Rust 1.85+ (for edition 2024)
-- CMake
-- OpenSSL development libraries
-
-> **Kerberos support:** If you need Kerberos (GSSAPI) authentication, add `"gssapi"` to the rdkafka features in `Cargo.toml` and install `cyrus-sasl` (`brew install cyrus-sasl` on macOS, `libsasl2-dev` on Debian/Ubuntu). See [Building with Kerberos Support](docs/configuration.md#building-with-kerberos-support) for details.
-
-```bash
-# Clone the repository
-git clone https://github.com/osodevops/k2i.git
-cd k2i
-
-# Build release binary
-cargo build --release
-
-# Run tests
-cargo test
-
-# Run with debug logging
-RUST_LOG=debug cargo run -p k2i-cli -- --help
-```
-
-## Running Tests
-
-```bash
-# Unit tests
-cargo test --lib
-
-# All tests
-cargo test
-
-# With coverage
-cargo tarpaulin --out Html
-```
+| [Man Pages](docs/man/man1/k2i.1) | Generated man pages for every CLI command and subcommand |
+| [Deployment](docs/deployment.md) | Deployment patterns and operational notes |
+| [Troubleshooting](docs/troubleshooting.md) | Common issues and recovery guidance |
+| [FAQ](docs/faq.md) | Short answers for common user questions |
+| [Production Readiness](docs/production-readiness.md) | Verification status, caveats, and follow-up issues |
 
 ## Project Structure
 
-```
+```text
 k2i/
-├── crates/
-│   ├── k2i-core/           # Core library
-│   │   ├── src/
-│   │   │   ├── kafka/      # Smart Kafka consumer
-│   │   │   ├── buffer/     # Hot buffer (Arrow + indexes)
-│   │   │   ├── iceberg/    # Iceberg writer
-│   │   │   ├── txlog/      # Transaction log
-│   │   │   ├── catalog/    # Catalog backends
-│   │   │   └── maintenance/# Compaction, expiration
-│   │   └── tests/
-│   └── k2i-cli/            # CLI binary
-├── config/                  # Example configurations
-└── docs/                    # Documentation
+|-- crates/
+|   |-- k2i-core/         # Core ingestion library
+|   |-- k2i-cli/          # CLI binary and HTTP server
+|   |-- k2i-rpc/          # Read-state protocol types and framing
+|   |-- k2i-rpc-server/   # Unix socket RPC server
+|   `-- k2i-e2e-runner/   # Docker E2E producer/verifier
+|-- config/               # Example configuration
+|-- docker/e2e/           # Local E2E compose stacks
+|-- docs/                 # Current release docs plus historical archive
+`-- scripts/              # E2E wrapper scripts
 ```
+
+## FAQ
+
+**Is K2I a Kafka Connect plugin?**
+
+No. K2I is a standalone Rust service with its own Kafka consumer, transaction log, writer, CLI, health server, and metrics server.
+
+**Does K2I provide exactly-once delivery?**
+
+K2I is designed for exactly-once-style durability by combining manual Kafka offset management, transaction-log recovery records, idempotency records, immutable Parquet writes, and atomic Iceberg commits. See the production-readiness caveats for the remaining hardening work.
+
+**How fresh is data in K2I?**
+
+Recent rows can be visible through the local read-state RPC before the next cold commit. Iceberg query engines see data after a flush writes Parquet and commits an Iceberg snapshot.
+
+**Can DuckDB read tables written by K2I?**
+
+Yes. The Docker Iceberg E2E validates K2I output with DuckDB direct Parquet reads and DuckDB `iceberg_scan` against real Iceberg REST metadata.
+
+**Is K2I a CDC tool?**
+
+No. K2I is Kafka-native and optimized for append-oriented event streams. CDC updates/deletes and deletion vectors are outside the current scope.
+
+See the full [FAQ](docs/faq.md).
 
 ## Looking for Enterprise Apache Kafka Support?
 
-[OSO](https://oso.sh) engineers are solely focused on deploying, operating, and maintaining Apache Kafka platforms. If you need SLA-backed support or advanced features for compliance and security, our **Enterprise Edition** extends the core tool with capabilities designed for large-scale, regulated environments.
-
-### K2I: Enterprise Edition
-
-| Feature Category | Enterprise Capability |
-|------------------|----------------------|
-| **Security & Compliance** | AES-256 Encryption (client-side encryption at rest) |
-| | GDPR Compliance Tools (PII masking, data retention policies) |
-| | Audit Logging (comprehensive trail of all operations) |
-| | Role-Based Access Control (granular permissions) |
-| **Advanced Integrations** | Schema Registry Integration (Avro/Protobuf with ID mapping) |
-| | Secrets Management (Vault / AWS Secrets Manager integration) |
-| | SSO / OIDC (Okta, Azure AD, Google Auth) |
-| **Scale & Operations** | Multi-Table Support (single process, multiple destinations) |
-| | Log Shipping (Datadog, Splunk, Grafana Loki) |
-| | Advanced Metrics & Dashboard (throughput, latency, drill-down UI) |
-| **Support** | 24/7 SLA-Backed Support & dedicated Kafka consulting |
-
-Need help resolving operational issues or planning a data lakehouse strategy? Our team of experts can help you design, deploy, and operate K2I at scale.
-
-**[Talk with an expert today](https://oso.sh/contact/)** or email us at **enquiries@oso.sh**.
+[OSO](https://oso.sh) engineers are focused on deploying, operating, and maintaining Apache Kafka platforms. If you need SLA-backed support, security review, deployment help, or a broader data lakehouse strategy, contact **enquiries@oso.sh** or visit [oso.sh/contact](https://oso.sh/contact/).
 
 ## Contributing
 
-We welcome contributions of all kinds!
+- Report bugs with a minimal reproduction and relevant config.
+- Suggest features with the target workflow and failure mode.
+- Run the verification commands above before opening a PR that changes ingestion, schema, catalog, or CLI behavior.
+- Regenerate man pages after changing CLI help text, flags, or subcommands:
 
-- **Report Bugs:** Found a bug? Open an [issue on GitHub](https://github.com/osodevops/k2i/issues).
-- **Suggest Features:** Have an idea? [Request a feature](https://github.com/osodevops/k2i/issues/new).
-- **Contribute Code:** Check out our [good first issues](https://github.com/osodevops/k2i/labels/good%20first%20issue) for beginner-friendly tasks.
-- **Improve Docs:** Help us improve the documentation by submitting pull requests.
-
-### Development Workflow
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+```bash
+cargo run -p k2i-cli -- completions man --output-dir docs/man/man1
+```
 
 ## License
 
@@ -362,18 +335,13 @@ K2I is licensed under the [Apache License 2.0](LICENSE).
 
 ## Acknowledgments
 
-K2I draws inspiration from the [Moonlink architecture](https://www.mooncake.dev/moonlink/) by Mooncake Labs.
+K2I draws architectural inspiration from Moonlink by Mooncake Labs, adapted for Kafka-native final-form event streams rather than Postgres CDC.
 
-Built with these excellent Rust crates:
-- [rdkafka](https://crates.io/crates/rdkafka) - Kafka consumer (librdkafka bindings)
-- [arrow](https://crates.io/crates/arrow) - In-memory columnar storage
-- [parquet](https://crates.io/crates/parquet) - File format encoding
-- [iceberg](https://crates.io/crates/iceberg) - Table format operations
-- [tokio](https://tokio.rs) - Async runtime
-- [axum](https://crates.io/crates/axum) - HTTP servers
+Built with:
 
----
-
-<p align="center">
-  Made with care by <a href="https://oso.sh">OSO</a>
-</p>
+- [rdkafka](https://crates.io/crates/rdkafka)
+- [arrow](https://crates.io/crates/arrow)
+- [parquet](https://crates.io/crates/parquet)
+- [iceberg](https://crates.io/crates/iceberg)
+- [tokio](https://tokio.rs)
+- [axum](https://crates.io/crates/axum)

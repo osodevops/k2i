@@ -1,6 +1,21 @@
 # K2I Deployment Guide
 
-This guide covers production deployment strategies for K2I.
+This guide covers deployment patterns for K2I. Treat the current release as production-oriented rather than production-complete: validate your exact Kafka cluster, Iceberg catalog, object store, schema behavior, recovery expectations, and maintenance workflow before broad rollout.
+
+See [Production Readiness](./production-readiness.md) for the current verification status and hardening follow-ups.
+
+## First-Release Deployment Stance
+
+Recommended first-release deployment model:
+
+- run one K2I process per Kafka topic and Iceberg table;
+- persist `transaction_log.log_dir` on durable storage;
+- start with the REST catalog path if you want the same path covered by local Docker E2E;
+- use `/healthz` for liveness and `/readyz` for readiness;
+- run the Docker Iceberg E2E and load profile before promoting a build;
+- keep maintenance commands explicit until scheduler wiring is reviewed in your deployment.
+
+Avoid deploying multiple active K2I writers to the same table until conflict, recovery, and multi-partition behavior have been validated for your workload.
 
 ## Deployment Options
 
@@ -485,7 +500,7 @@ spec:
 
 ### Transaction Log Persistence
 
-The transaction log must persist across restarts for exactly-once semantics:
+The transaction log must persist across restarts for K2I's exactly-once-style durability design:
 
 - **Kubernetes**: Use PersistentVolumeClaim
 - **Docker**: Use named volumes
@@ -508,7 +523,7 @@ scrape_configs:
 
 Key panels to include:
 
-1. **Throughput**: `rate(k2i_messages_total[5m])`
+1. **Throughput**: `rate(k2i_messages_consumed_total[5m])`
 2. **Buffer Size**: `k2i_buffer_size_bytes`
 3. **Flush Duration**: `histogram_quantile(0.99, k2i_flush_duration_seconds_bucket)`
 4. **Error Rate**: `rate(k2i_errors_total[5m])`

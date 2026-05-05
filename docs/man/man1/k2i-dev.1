@@ -1,0 +1,45 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH k2i-dev 1  "k2i-dev "
+.SH NAME
+k2i\-dev \- Run a zero\-cloud local development instance
+.SH SYNOPSIS
+\fBk2i\-dev\fR <\fB\-\-topic\fR> <\fB\-\-warehouse\fR> [\fB\-\-bootstrap\-servers\fR] [\fB\-\-database\fR] [\fB\-\-table\fR] [\fB\-\-consumer\-group\fR] [\fB\-\-schema\-registry\-url\fR] [\fB\-\-message\-type\fR] [\fB\-h\fR|\fB\-\-help\fR]
+.SH DESCRIPTION
+Run a zero\-cloud local development instance
+.SH OPTIONS
+.TP
+\fB\-\-topic\fR \fI<TOPIC>\fR
+Kafka topic to consume
+.TP
+\fB\-\-warehouse\fR \fI<WAREHOUSE>\fR
+Local warehouse directory
+.TP
+\fB\-\-bootstrap\-servers\fR \fI<BOOTSTRAP_SERVERS>\fR [default: localhost:9092]
+Kafka bootstrap servers
+.TP
+\fB\-\-database\fR \fI<DATABASE>\fR [default: default]
+Database/namespace name
+.TP
+\fB\-\-table\fR \fI<TABLE>\fR [default: events]
+Table name
+.TP
+\fB\-\-consumer\-group\fR \fI<CONSUMER_GROUP>\fR [default: k2i\-dev]
+Consumer group
+.TP
+\fB\-\-schema\-registry\-url\fR \fI<SCHEMA_REGISTRY_URL>\fR
+Optional Confluent Schema Registry URL for Protobuf values
+.TP
+\fB\-\-message\-type\fR \fI<MESSAGE_TYPE>\fR
+Optional fully\-qualified Protobuf message type
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.SH EXTRA
+EXAMPLES:
+  k2i dev \-\-topic events \-\-warehouse ./warehouse
+  k2i dev \-\-topic f1.timing.derived_state \-\-warehouse ./warehouse \-\-schema\-registry\-url http://localhost:8081 \-\-message\-type f1.timing.v1.DerivedState
+
+BEHAVIOR:
+  Creates a local warehouse, transaction\-log directory, runtime socket directory,
+  SQLite catalog, filesystem object store, and enabled read\-state RPC socket.

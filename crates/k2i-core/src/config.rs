@@ -11,6 +11,10 @@ pub struct Config {
     /// Kafka configuration
     pub kafka: KafkaConfig,
 
+    /// Runtime schema evolution behavior
+    #[serde(default)]
+    pub schema_evolution: SchemaEvolutionRuntimeConfig,
+
     /// Iceberg configuration
     pub iceberg: IcebergConfig,
 
@@ -29,6 +33,10 @@ pub struct Config {
     /// Monitoring configuration
     #[serde(default)]
     pub monitoring: MonitoringConfig,
+
+    /// Real-time read RPC configuration
+    #[serde(default)]
+    pub rpc: RpcConfig,
 }
 
 /// Kafka consumer configuration.
@@ -70,6 +78,111 @@ pub struct KafkaConfig {
     /// Security configuration
     #[serde(default)]
     pub security: KafkaSecurityConfig,
+
+    /// Kafka value format.
+    #[serde(default)]
+    pub format: KafkaFormatConfig,
+}
+
+/// Kafka value format configuration.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+pub enum KafkaFormatConfig {
+    /// Preserve raw Kafka key/value bytes.
+    #[default]
+    Raw,
+    /// JSON value payloads.
+    Json,
+    /// Confluent Schema Registry Protobuf value payloads.
+    Protobuf(ProtobufFormatConfig),
+}
+
+/// Protobuf format configuration.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct ProtobufFormatConfig {
+    /// Confluent Schema Registry URL.
+    pub schema_registry_url: String,
+
+    /// Optional subject strategy. Defaults to topic_name.
+    #[serde(default)]
+    pub subject_strategy: ProtobufSubjectStrategy,
+
+    /// Fully-qualified Protobuf message type.
+    #[serde(default)]
+    pub message_type: Option<String>,
+
+    /// Registry cache TTL in seconds.
+    #[serde(default = "default_schema_registry_cache_ttl_seconds")]
+    pub cache_ttl_seconds: u64,
+
+    /// Fetch latest subject schema on startup.
+    #[serde(default = "default_true")]
+    pub latest_on_startup: bool,
+}
+
+/// Protobuf subject strategy.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProtobufSubjectStrategy {
+    /// `<topic>-value`.
+    #[default]
+    TopicName,
+    /// Fully-qualified record name.
+    RecordName,
+    /// `<topic>-<record>`.
+    TopicRecordName,
+}
+
+/// Runtime schema evolution mode.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SchemaEvolutionMode {
+    /// Operator-managed evolution only.
+    Manual,
+    /// Automatically add backward-compatible nullable fields.
+    #[default]
+    AutoAdditive,
+    /// Reserved for wider compatibility policy.
+    Permissive,
+}
+
+/// Runtime behavior when a breaking schema change is observed.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum OnBreakingChange {
+    /// Pause ingestion and mark the table degraded.
+    #[default]
+    Pause,
+    /// Fail the process.
+    Fail,
+    /// Skip the offending message.
+    SkipMessage,
+}
+
+/// Runtime schema evolution configuration.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct SchemaEvolutionRuntimeConfig {
+    /// Evolution policy.
+    #[serde(default)]
+    pub mode: SchemaEvolutionMode,
+
+    /// Behavior for breaking changes.
+    #[serde(default)]
+    pub on_breaking_change: OnBreakingChange,
+
+    /// Minimum interval between schema update commits.
+    #[serde(default = "default_schema_update_min_interval_seconds")]
+    pub schema_update_min_interval_seconds: u64,
+}
+
+impl Default for SchemaEvolutionRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            mode: SchemaEvolutionMode::AutoAdditive,
+            on_breaking_change: OnBreakingChange::Pause,
+            schema_update_min_interval_seconds: default_schema_update_min_interval_seconds(),
+        }
+    }
 }
 
 /// Kafka auto offset reset strategy.
@@ -172,6 +285,14 @@ pub struct IcebergConfig {
     /// Nessie catalog configuration (advanced)
     #[serde(default)]
     pub nessie: Option<NessieCatalogConfig>,
+
+    /// SQL catalog configuration for local-first deployments.
+    #[serde(default)]
+    pub sql_catalog: Option<SqlCatalogConfig>,
+
+    /// Object store configuration used by local-first deployments.
+    #[serde(default)]
+    pub object_store: ObjectStoreConfig,
 }
 
 /// Catalog manager configuration.
@@ -371,6 +492,69 @@ impl Default for NessieCatalogConfig {
     }
 }
 
+/// SQL catalog backend type.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum SqlCatalogBackend {
+    /// SQLite file-backed catalog for local/edge deployments.
+    #[default]
+    Sqlite,
+    /// PostgreSQL catalog for multi-writer deployments.
+    Postgres,
+}
+
+/// SQL catalog configuration.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct SqlCatalogConfig {
+    /// SQL backend type.
+    #[serde(default)]
+    pub r#type: SqlCatalogBackend,
+    /// SQLx connection URL, e.g. sqlite:///var/lib/k2i/catalog.db.
+    pub url: String,
+    /// Catalog namespace/name inside the SQL catalog tables.
+    #[serde(default = "default_sql_catalog_name")]
+    pub catalog_name: String,
+}
+
+fn default_sql_catalog_name() -> String {
+    "k2i".to_string()
+}
+
+/// Object store backend type.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ObjectStoreType {
+    /// Local filesystem object store.
+    #[default]
+    Filesystem,
+    /// S3-compatible object store.
+    S3,
+    /// Google Cloud Storage.
+    Gcs,
+    /// Azure Blob/Data Lake storage.
+    Azure,
+}
+
+/// Object store configuration.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct ObjectStoreConfig {
+    /// Object store type.
+    #[serde(default)]
+    pub r#type: ObjectStoreType,
+    /// Root URI/path for the object store.
+    #[serde(default)]
+    pub root: Option<String>,
+}
+
+impl Default for ObjectStoreConfig {
+    fn default() -> Self {
+        Self {
+            r#type: ObjectStoreType::Filesystem,
+            root: None,
+        }
+    }
+}
+
 /// Iceberg catalog type.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -383,6 +567,8 @@ pub enum CatalogType {
     Glue,
     /// Nessie catalog
     Nessie,
+    /// Embedded SQL catalog
+    Sql,
 }
 
 /// Parquet compression codec.
@@ -599,6 +785,47 @@ impl Default for MonitoringConfig {
     }
 }
 
+/// Real-time read RPC configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RpcConfig {
+    /// Enable the Unix socket read-state RPC server.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Unix socket path for local read clients.
+    #[serde(default = "default_rpc_socket_path")]
+    pub socket_path: PathBuf,
+
+    /// Maximum time to wait for a requested LSN.
+    #[serde(default = "default_rpc_read_timeout_ms")]
+    pub read_timeout_ms: u64,
+
+    /// Maximum number of concurrent scans to keep pinned.
+    #[serde(default = "default_rpc_max_concurrent_scans")]
+    pub max_concurrent_scans: usize,
+
+    /// TTL for abandoned scans in seconds.
+    #[serde(default = "default_rpc_scan_ttl_seconds")]
+    pub scan_ttl_seconds: u64,
+
+    /// Maximum accepted RPC frame size in bytes.
+    #[serde(default = "default_rpc_max_frame_bytes")]
+    pub max_frame_bytes: usize,
+}
+
+impl Default for RpcConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            socket_path: default_rpc_socket_path(),
+            read_timeout_ms: default_rpc_read_timeout_ms(),
+            max_concurrent_scans: default_rpc_max_concurrent_scans(),
+            scan_ttl_seconds: default_rpc_scan_ttl_seconds(),
+            max_frame_bytes: default_rpc_max_frame_bytes(),
+        }
+    }
+}
+
 /// Log level.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -661,6 +888,15 @@ fn default_flush_batch_size() -> usize {
 fn default_memory_alignment() -> usize {
     64
 }
+fn default_true() -> bool {
+    true
+}
+fn default_schema_registry_cache_ttl_seconds() -> u64 {
+    300
+}
+fn default_schema_update_min_interval_seconds() -> u64 {
+    60
+}
 fn default_log_dir() -> PathBuf {
     PathBuf::from("./transaction_logs")
 }
@@ -699,6 +935,21 @@ fn default_metrics_port() -> u16 {
 }
 fn default_health_port() -> u16 {
     8080
+}
+fn default_rpc_socket_path() -> PathBuf {
+    PathBuf::from("./run/k2i.sock")
+}
+fn default_rpc_read_timeout_ms() -> u64 {
+    1000
+}
+fn default_rpc_max_concurrent_scans() -> usize {
+    64
+}
+fn default_rpc_scan_ttl_seconds() -> u64 {
+    300
+}
+fn default_rpc_max_frame_bytes() -> usize {
+    k2i_rpc::DEFAULT_MAX_FRAME_BYTES
 }
 
 // Catalog manager defaults
@@ -748,8 +999,75 @@ impl Config {
             return Err(crate::Error::Config("Consumer group is required".into()));
         }
 
+        if let KafkaFormatConfig::Protobuf(format) = &self.kafka.format {
+            if format.schema_registry_url.trim().is_empty() {
+                return Err(crate::Error::Config(
+                    "kafka.format.schema_registry_url is required for protobuf".into(),
+                ));
+            }
+
+            if format.cache_ttl_seconds == 0 {
+                return Err(crate::Error::Config(
+                    "kafka.format.cache_ttl_seconds must be greater than zero".into(),
+                ));
+            }
+
+            if let Some(message_type) = &format.message_type {
+                if message_type.trim().is_empty() {
+                    return Err(crate::Error::Config(
+                        "kafka.format.message_type must not be empty when set".into(),
+                    ));
+                }
+            }
+
+            if matches!(
+                format.subject_strategy,
+                ProtobufSubjectStrategy::RecordName | ProtobufSubjectStrategy::TopicRecordName
+            ) && format.message_type.is_none()
+            {
+                return Err(crate::Error::Config(
+                    "kafka.format.message_type is required for record_name and topic_record_name subject strategies".into(),
+                ));
+            }
+        }
+
         if self.iceberg.warehouse_path.is_empty() {
             return Err(crate::Error::Config("Warehouse path is required".into()));
+        }
+
+        if self.iceberg.catalog_type == CatalogType::Sql {
+            let sql_catalog = self.iceberg.sql_catalog.as_ref().ok_or_else(|| {
+                crate::Error::Config("iceberg.sql_catalog is required when catalog_type=sql".into())
+            })?;
+            if sql_catalog.url.trim().is_empty() {
+                return Err(crate::Error::Config(
+                    "iceberg.sql_catalog.url must not be empty".into(),
+                ));
+            }
+            if sql_catalog.catalog_name.trim().is_empty() {
+                return Err(crate::Error::Config(
+                    "iceberg.sql_catalog.catalog_name must not be empty".into(),
+                ));
+            }
+        }
+
+        if self.rpc.max_concurrent_scans == 0 {
+            return Err(crate::Error::Config(
+                "RPC max_concurrent_scans must be greater than zero".into(),
+            ));
+        }
+
+        if self.rpc.max_frame_bytes == 0 {
+            return Err(crate::Error::Config(
+                "RPC max_frame_bytes must be greater than zero".into(),
+            ));
+        }
+
+        if self.schema_evolution.schema_update_min_interval_seconds == 0 {
+            return Err(crate::Error::Config(
+                "schema_evolution.schema_update_min_interval_seconds must be greater than zero"
+                    .into(),
+            ));
         }
 
         if self.buffer.memory_alignment_bytes != 64 {
@@ -789,7 +1107,9 @@ mod tests {
                 max_poll_interval_ms: default_max_poll_interval_ms(),
                 auto_offset_reset: OffsetReset::Earliest,
                 security: KafkaSecurityConfig::default(),
+                format: KafkaFormatConfig::Raw,
             },
+            schema_evolution: SchemaEvolutionRuntimeConfig::default(),
             iceberg: IcebergConfig {
                 catalog_type: CatalogType::Rest,
                 warehouse_path: "s3://bucket/warehouse".into(),
@@ -809,11 +1129,14 @@ mod tests {
                 rest: RestCatalogConfig::default(),
                 glue: GlueCatalogConfig::default(),
                 nessie: None,
+                sql_catalog: None,
+                object_store: ObjectStoreConfig::default(),
             },
             buffer: BufferConfig::default(),
             transaction_log: TransactionLogConfig::default(),
             maintenance: MaintenanceConfig::default(),
             monitoring: MonitoringConfig::default(),
+            rpc: RpcConfig::default(),
         };
 
         assert!(config.validate().is_ok());
@@ -833,7 +1156,9 @@ mod tests {
                 max_poll_interval_ms: default_max_poll_interval_ms(),
                 auto_offset_reset: OffsetReset::Earliest,
                 security: KafkaSecurityConfig::default(),
+                format: KafkaFormatConfig::Raw,
             },
+            schema_evolution: SchemaEvolutionRuntimeConfig::default(),
             iceberg: IcebergConfig {
                 catalog_type: CatalogType::Rest,
                 warehouse_path: "s3://bucket/warehouse".into(),
@@ -853,11 +1178,14 @@ mod tests {
                 rest: RestCatalogConfig::default(),
                 glue: GlueCatalogConfig::default(),
                 nessie: None,
+                sql_catalog: None,
+                object_store: ObjectStoreConfig::default(),
             },
             buffer: BufferConfig::default(),
             transaction_log: TransactionLogConfig::default(),
             maintenance: MaintenanceConfig::default(),
             monitoring: MonitoringConfig::default(),
+            rpc: RpcConfig::default(),
         };
 
         assert!(config.validate().is_err());
@@ -895,6 +1223,17 @@ mod tests {
     }
 
     #[test]
+    fn test_default_rpc_config() {
+        let config = RpcConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.socket_path, PathBuf::from("./run/k2i.sock"));
+        assert_eq!(config.read_timeout_ms, 1000);
+        assert_eq!(config.max_concurrent_scans, 64);
+        assert_eq!(config.scan_ttl_seconds, 300);
+        assert_eq!(config.max_frame_bytes, k2i_rpc::DEFAULT_MAX_FRAME_BYTES);
+    }
+
+    #[test]
     fn test_log_level_variants() {
         assert_eq!(LogLevel::default(), LogLevel::Info);
         assert_ne!(LogLevel::Trace, LogLevel::Debug);
@@ -925,6 +1264,36 @@ mod tests {
         // CatalogType doesn't have Default, just test equality
         assert_eq!(CatalogType::Rest, CatalogType::Rest);
         assert_ne!(CatalogType::Hive, CatalogType::Rest);
+    }
+
+    #[test]
+    fn test_sql_catalog_config_validation() {
+        let config: Config = toml::from_str(
+            r#"
+            [kafka]
+            bootstrap_servers = ["localhost:9092"]
+            topic = "test"
+            consumer_group = "test"
+
+            [iceberg]
+            catalog_type = "sql"
+            warehouse_path = "./data/warehouse"
+            database_name = "f1"
+            table_name = "historical"
+
+            [iceberg.sql_catalog]
+            type = "sqlite"
+            url = "sqlite:///tmp/k2i-test-catalog.db"
+
+            [iceberg.object_store]
+            type = "filesystem"
+            root = "./data/warehouse"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(config.iceberg.catalog_type, CatalogType::Sql);
+        assert!(config.validate().is_ok());
     }
 
     #[test]
@@ -960,7 +1329,9 @@ mod tests {
                 max_poll_interval_ms: default_max_poll_interval_ms(),
                 auto_offset_reset: OffsetReset::Earliest,
                 security: KafkaSecurityConfig::default(),
+                format: KafkaFormatConfig::Raw,
             },
+            schema_evolution: SchemaEvolutionRuntimeConfig::default(),
             iceberg: IcebergConfig {
                 catalog_type: CatalogType::Rest,
                 warehouse_path: "s3://bucket/warehouse".into(),
@@ -980,11 +1351,14 @@ mod tests {
                 rest: RestCatalogConfig::default(),
                 glue: GlueCatalogConfig::default(),
                 nessie: None,
+                sql_catalog: None,
+                object_store: ObjectStoreConfig::default(),
             },
             buffer: BufferConfig::default(),
             transaction_log: TransactionLogConfig::default(),
             maintenance: MaintenanceConfig::default(),
             monitoring: MonitoringConfig::default(),
+            rpc: RpcConfig::default(),
         };
 
         let err = config.validate().unwrap_err();
@@ -1005,7 +1379,9 @@ mod tests {
                 max_poll_interval_ms: default_max_poll_interval_ms(),
                 auto_offset_reset: OffsetReset::Earliest,
                 security: KafkaSecurityConfig::default(),
+                format: KafkaFormatConfig::Raw,
             },
+            schema_evolution: SchemaEvolutionRuntimeConfig::default(),
             iceberg: IcebergConfig {
                 catalog_type: CatalogType::Rest,
                 warehouse_path: "s3://bucket/warehouse".into(),
@@ -1025,11 +1401,14 @@ mod tests {
                 rest: RestCatalogConfig::default(),
                 glue: GlueCatalogConfig::default(),
                 nessie: None,
+                sql_catalog: None,
+                object_store: ObjectStoreConfig::default(),
             },
             buffer: BufferConfig::default(),
             transaction_log: TransactionLogConfig::default(),
             maintenance: MaintenanceConfig::default(),
             monitoring: MonitoringConfig::default(),
+            rpc: RpcConfig::default(),
         };
 
         let err = config.validate().unwrap_err();
@@ -1050,7 +1429,9 @@ mod tests {
                 max_poll_interval_ms: default_max_poll_interval_ms(),
                 auto_offset_reset: OffsetReset::Earliest,
                 security: KafkaSecurityConfig::default(),
+                format: KafkaFormatConfig::Raw,
             },
+            schema_evolution: SchemaEvolutionRuntimeConfig::default(),
             iceberg: IcebergConfig {
                 catalog_type: CatalogType::Rest,
                 warehouse_path: "".into(), // Empty warehouse path
@@ -1070,11 +1451,14 @@ mod tests {
                 rest: RestCatalogConfig::default(),
                 glue: GlueCatalogConfig::default(),
                 nessie: None,
+                sql_catalog: None,
+                object_store: ObjectStoreConfig::default(),
             },
             buffer: BufferConfig::default(),
             transaction_log: TransactionLogConfig::default(),
             maintenance: MaintenanceConfig::default(),
             monitoring: MonitoringConfig::default(),
+            rpc: RpcConfig::default(),
         };
 
         let err = config.validate().unwrap_err();

@@ -32,8 +32,40 @@ pub struct RecoveryState {
     /// Successfully committed file paths (for verification)
     pub committed_files: HashSet<String>,
 
+    /// Data files recovered for read-state clients.
+    pub read_data_files: Vec<RecoveredReadDataFile>,
+
     /// Total entries processed
     pub entries_processed: u64,
+}
+
+/// Data file recovered from transaction log entries for read-state seeding.
+#[derive(Debug, Clone)]
+pub struct RecoveredReadDataFile {
+    /// Minimum table read LSN in the file.
+    pub min_lsn: u64,
+    /// Maximum table read LSN in the file.
+    pub read_lsn: u64,
+    /// Database name.
+    pub database: String,
+    /// Table name.
+    pub table: String,
+    /// Kafka topic.
+    pub topic: String,
+    /// Kafka partition.
+    pub partition: i32,
+    /// Minimum Kafka offset in the file.
+    pub min_offset: i64,
+    /// Maximum Kafka offset in the file.
+    pub max_offset: i64,
+    /// Iceberg snapshot ID.
+    pub snapshot_id: i64,
+    /// Absolute local path or object-store URI.
+    pub file_path: String,
+    /// File size in bytes.
+    pub file_size_bytes: u64,
+    /// Number of rows in the file.
+    pub row_count: u64,
 }
 
 /// Information about an orphan file that needs cleanup.
@@ -145,6 +177,46 @@ impl RecoveryState {
                             .last_kafka_offsets
                             .insert(("default".to_string(), 0), last_kafka_offset);
                     }
+                }
+
+                TransactionEntry::DataFileCommitted {
+                    min_lsn,
+                    read_lsn,
+                    database,
+                    table,
+                    topic,
+                    partition,
+                    min_offset,
+                    max_offset,
+                    snapshot_id,
+                    file_path,
+                    file_size_bytes,
+                    row_count,
+                    ..
+                } => {
+                    state.committed_files.insert(file_path.clone());
+                    state.read_data_files.push(RecoveredReadDataFile {
+                        min_lsn,
+                        read_lsn,
+                        database,
+                        table,
+                        topic,
+                        partition,
+                        min_offset,
+                        max_offset,
+                        snapshot_id,
+                        file_path,
+                        file_size_bytes,
+                        row_count,
+                    });
+                }
+
+                TransactionEntry::TableReset {
+                    database, table, ..
+                } => {
+                    state
+                        .read_data_files
+                        .retain(|file| !(file.database == database && file.table == table));
                 }
 
                 _ => {}

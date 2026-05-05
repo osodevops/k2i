@@ -1,0 +1,24 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH k2i-status 1  "k2i-status "
+.SH NAME
+k2i\-status \- Show status and health
+.SH SYNOPSIS
+\fBk2i\-status\fR [\fB\-\-url\fR] [\fB\-h\fR|\fB\-\-help\fR]
+.SH DESCRIPTION
+Show status and health
+.SH OPTIONS
+.TP
+\fB\-\-url\fR \fI<URL>\fR [default: http://localhost:8080]
+Health endpoint URL
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.SH EXTRA
+EXAMPLES:
+  k2i status
+  k2i status \-\-url http://k2i\-prod.internal:8080
+
+BEHAVIOR:
+  Queries /health at the provided URL, then derives /metrics by replacing port
+  8080 with 9090.

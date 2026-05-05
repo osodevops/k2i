@@ -8,16 +8,19 @@
 //! - Guaranteed consistency via transaction log
 //! - Dual partitioning (preserve Kafka + optimize Iceberg)
 
+pub mod backfill;
 pub mod buffer;
 pub mod circuit_breaker;
 pub mod config;
 pub mod engine;
 pub mod error;
+pub mod format;
 pub mod health;
 pub mod iceberg;
 pub mod kafka;
 pub mod maintenance;
 pub mod metrics;
+pub mod read;
 pub mod txlog;
 
 // Re-export commonly used types

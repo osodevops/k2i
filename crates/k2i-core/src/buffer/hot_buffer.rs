@@ -17,6 +17,9 @@ use crate::{BufferError, Error, Result};
 use arrow::array::*;
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
+use arrow_ipc::writer::StreamWriter;
+use arrow_select::concat::concat_batches;
+use arrow_select::filter::filter_record_batch;
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -45,13 +48,15 @@ pub struct BufferedRecord {
     pub timestamp: i64,
     /// Message headers
     pub headers: Vec<(String, Vec<u8>)>,
+    /// Table-scoped read LSN assigned when the record entered K2I.
+    pub read_lsn: u64,
     /// When the record was inserted into the buffer
     pub inserted_at: Instant,
 }
 
 impl BufferedRecord {
     /// Create from a KafkaMessage.
-    fn from_message(msg: &KafkaMessage) -> Self {
+    fn from_message(msg: &KafkaMessage, read_lsn: u64) -> Self {
         Self {
             key: msg.key.clone(),
             value: msg.value.clone(),
@@ -60,6 +65,7 @@ impl BufferedRecord {
             offset: msg.offset,
             timestamp: msg.timestamp,
             headers: msg.headers.clone(),
+            read_lsn,
             inserted_at: Instant::now(),
         }
     }
@@ -93,13 +99,37 @@ impl QueryResult {
     }
 }
 
+/// A destructive buffer snapshot used for flushing.
+#[derive(Debug)]
+pub struct HotBufferSnapshot {
+    /// Arrow batch to write to Parquet.
+    pub batch: RecordBatch,
+    /// Records captured in the snapshot for read handoff while the file is in flight.
+    pub records: Vec<BufferedRecord>,
+}
+
+impl HotBufferSnapshot {
+    /// Number of rows in the snapshot batch.
+    pub fn num_rows(&self) -> usize {
+        self.batch.num_rows()
+    }
+
+    /// Estimated Arrow array memory size for the snapshot batch.
+    pub fn get_array_memory_size(&self) -> usize {
+        self.batch.get_array_memory_size()
+    }
+}
+
 /// Hot buffer manager with Arrow storage and hash index.
 pub struct HotBuffer {
     /// Arrow schema for the buffer
-    schema: SchemaRef,
+    schema: RwLock<SchemaRef>,
 
     /// Column builders (mutable during append)
     builders: RwLock<ColumnBuilders>,
+
+    /// Decoded Arrow batches appended by pluggable format decoders.
+    decoded_batches: RwLock<Vec<RecordBatch>>,
 
     /// Raw record storage for queries (indexed by RowId)
     records: RwLock<Vec<BufferedRecord>>,
@@ -113,6 +143,9 @@ pub struct HotBuffer {
 
     /// Buffer statistics
     stats: BufferStats,
+
+    /// Memory held by decoded Arrow batches.
+    decoded_memory_bytes: AtomicUsize,
 
     /// Configuration
     config: BufferConfig,
@@ -128,6 +161,7 @@ struct ColumnBuilders {
     partition_builder: Int32Builder,
     offset_builder: Int64Builder,
     timestamp_builder: Int64Builder,
+    read_lsn_builder: UInt64Builder,
     row_count: usize,
     memory_bytes: usize,
 }
@@ -150,15 +184,18 @@ impl HotBuffer {
             Field::new("partition", DataType::Int32, false),
             Field::new("offset", DataType::Int64, false),
             Field::new("timestamp", DataType::Int64, false),
+            Field::new("read_lsn", DataType::UInt64, false),
         ]));
 
         Self {
-            schema,
+            schema: RwLock::new(schema),
             builders: RwLock::new(ColumnBuilders::new()),
+            decoded_batches: RwLock::new(Vec::new()),
             records: RwLock::new(Vec::new()),
             key_index: DashMap::new(),
             offset_index: DashMap::new(),
             stats: BufferStats::new(),
+            decoded_memory_bytes: AtomicUsize::new(0),
             config,
             created_at: Instant::now(),
         }
@@ -166,6 +203,11 @@ impl HotBuffer {
 
     /// Append a Kafka message to the buffer.
     pub fn append(&self, msg: &KafkaMessage) -> Result<RowId> {
+        self.append_with_lsn(msg, 0)
+    }
+
+    /// Append a Kafka message to the buffer with an explicit table read LSN.
+    pub fn append_with_lsn(&self, msg: &KafkaMessage, read_lsn: u64) -> Result<RowId> {
         let mut builders = self.builders.write();
 
         // Check capacity before append
@@ -190,6 +232,7 @@ impl HotBuffer {
         builders.partition_builder.append_value(msg.partition);
         builders.offset_builder.append_value(msg.offset);
         builders.timestamp_builder.append_value(msg.timestamp);
+        builders.read_lsn_builder.append_value(read_lsn);
 
         builders.row_count += 1;
 
@@ -202,7 +245,7 @@ impl HotBuffer {
         // Store record for querying
         {
             let mut records = self.records.write();
-            records.push(BufferedRecord::from_message(msg));
+            records.push(BufferedRecord::from_message(msg, read_lsn));
         }
 
         // Update indexes (lock-free operations)
@@ -219,6 +262,78 @@ impl HotBuffer {
             .fetch_add(msg_size, Ordering::Relaxed);
 
         Ok(row_id)
+    }
+
+    /// Append an already-decoded Arrow batch and its source Kafka metadata.
+    pub fn append_record_batch(
+        &self,
+        batch: RecordBatch,
+        messages: &[KafkaMessage],
+        read_lsns: &[u64],
+    ) -> Result<Vec<RowId>> {
+        if batch.num_rows() != messages.len() || messages.len() != read_lsns.len() {
+            return Err(Error::Buffer(BufferError::SchemaMismatch {
+                expected: format!(
+                    "{} batch rows, {} messages, {} read LSNs",
+                    batch.num_rows(),
+                    batch.num_rows(),
+                    batch.num_rows()
+                ),
+                actual: format!(
+                    "{} batch rows, {} messages, {} read LSNs",
+                    batch.num_rows(),
+                    messages.len(),
+                    read_lsns.len()
+                ),
+            }));
+        }
+
+        let batch_memory = batch.get_array_memory_size();
+        if self.memory_bytes() + batch_memory >= self.config.max_size_mb * 1_000_000 {
+            return Err(Error::Buffer(BufferError::BufferFull {
+                size_bytes: self.memory_bytes() + batch_memory,
+            }));
+        }
+
+        {
+            let mut schema = self.schema.write();
+            if self.row_count() == 0 {
+                *schema = batch.schema();
+            } else if schema.as_ref() != batch.schema().as_ref() {
+                return Err(Error::Buffer(BufferError::SchemaMismatch {
+                    expected: format!("{:?}", schema),
+                    actual: format!("{:?}", batch.schema()),
+                }));
+            }
+        }
+
+        let mut row_ids = Vec::with_capacity(messages.len());
+        {
+            let mut records = self.records.write();
+            for (msg, read_lsn) in messages.iter().zip(read_lsns) {
+                let row_id = RowId(records.len());
+                records.push(BufferedRecord::from_message(msg, *read_lsn));
+                row_ids.push(row_id);
+
+                if let Some(ref key) = msg.key {
+                    self.key_index.insert(key.clone(), row_id);
+                }
+                self.offset_index
+                    .insert((msg.partition, msg.offset), row_id);
+
+                let msg_size = msg.size_bytes();
+                self.stats.total_records.fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .total_bytes
+                    .fetch_add(msg_size, Ordering::Relaxed);
+            }
+        }
+
+        self.decoded_memory_bytes
+            .fetch_add(batch_memory, Ordering::Relaxed);
+        self.decoded_batches.write().push(batch);
+
+        Ok(row_ids)
     }
 
     /// Look up by message key (O(1)).
@@ -368,21 +483,19 @@ impl HotBuffer {
 
     /// Check if buffer should flush based on size, count, or time.
     pub fn should_flush(&self) -> bool {
-        let builders = self.builders.read();
-
         // Size-based flush
-        if builders.memory_bytes >= self.config.max_size_mb * 1_000_000 {
+        if self.memory_bytes() >= self.config.max_size_mb * 1_000_000 {
             return true;
         }
 
         // Count-based flush
-        if builders.row_count >= self.config.flush_batch_size {
+        if self.row_count() >= self.config.flush_batch_size {
             return true;
         }
 
         // Time-based flush
         if self.created_at.elapsed().as_secs() >= self.config.flush_interval_seconds
-            && builders.row_count > 0
+            && self.row_count() > 0
         {
             return true;
         }
@@ -392,23 +505,53 @@ impl HotBuffer {
 
     /// Check if buffer is full (for backpressure).
     pub fn is_full(&self) -> bool {
-        let builders = self.builders.read();
-        builders.memory_bytes >= self.config.max_size_mb * 1_000_000
+        self.memory_bytes() >= self.config.max_size_mb * 1_000_000
     }
 
     /// Get current memory usage.
     pub fn memory_bytes(&self) -> usize {
-        self.builders.read().memory_bytes
+        self.builders.read().memory_bytes + self.decoded_memory_bytes.load(Ordering::Relaxed)
     }
 
     /// Get row count.
     pub fn row_count(&self) -> usize {
-        self.builders.read().row_count
+        let builder_rows = self.builders.read().row_count;
+        if builder_rows > 0 {
+            builder_rows
+        } else {
+            self.records.read().len()
+        }
     }
 
     /// Take a snapshot of the buffer as RecordBatch (for flushing).
     /// This clears the buffer and returns the data.
-    pub fn take_snapshot(&self) -> Result<Option<RecordBatch>> {
+    pub fn take_snapshot(&self) -> Result<Option<HotBufferSnapshot>> {
+        if !self.decoded_batches.read().is_empty() {
+            let mut decoded_batches = self.decoded_batches.write();
+            if decoded_batches.is_empty() {
+                return Ok(None);
+            }
+
+            let schema = self.schema.read().clone();
+            let batch = concat_batches(&schema, decoded_batches.iter())
+                .map_err(|e| Error::Buffer(BufferError::ArrowConversion(e.to_string())))?;
+            let row_count = batch.num_rows();
+            let records = self.records.read().clone();
+
+            decoded_batches.clear();
+            self.decoded_memory_bytes.store(0, Ordering::Relaxed);
+            drop(decoded_batches);
+
+            self.records.write().clear();
+            self.key_index.clear();
+            self.offset_index.clear();
+            self.stats.flushes.fetch_add(1, Ordering::Relaxed);
+
+            info!(rows = %row_count, "Decoded hot buffer snapshot taken");
+
+            return Ok(Some(HotBufferSnapshot { batch, records }));
+        }
+
         let mut builders = self.builders.write();
 
         if builders.row_count == 0 {
@@ -424,9 +567,10 @@ impl HotBuffer {
         let partition_array = builders.partition_builder.finish();
         let offset_array = builders.offset_builder.finish();
         let timestamp_array = builders.timestamp_builder.finish();
+        let read_lsn_array = builders.read_lsn_builder.finish();
 
         let batch = RecordBatch::try_new(
-            self.schema.clone(),
+            self.schema.read().clone(),
             vec![
                 Arc::new(key_array),
                 Arc::new(value_array),
@@ -434,9 +578,12 @@ impl HotBuffer {
                 Arc::new(partition_array),
                 Arc::new(offset_array),
                 Arc::new(timestamp_array),
+                Arc::new(read_lsn_array),
             ],
         )
         .map_err(|e| Error::Buffer(BufferError::ArrowConversion(e.to_string())))?;
+
+        let records = self.records.read().clone();
 
         // Reset builders
         *builders = ColumnBuilders::new();
@@ -455,15 +602,151 @@ impl HotBuffer {
 
         info!(rows = %row_count, "Hot buffer snapshot taken");
 
+        Ok(Some(HotBufferSnapshot { batch, records }))
+    }
+
+    /// Clone records currently visible to readers without modifying the buffer.
+    pub fn snapshot_records_for_read(&self, max_lsn: Option<u64>) -> Vec<BufferedRecord> {
+        let records = self.records.read();
+        records
+            .iter()
+            .filter(|record| max_lsn.map_or(true, |lsn| record.read_lsn <= lsn))
+            .cloned()
+            .collect()
+    }
+
+    /// Clone decoded batches visible to readers without modifying the buffer.
+    pub fn snapshot_record_batches_for_read(
+        &self,
+        max_lsn: Option<u64>,
+    ) -> Result<Vec<RecordBatch>> {
+        let batches = self.decoded_batches.read();
+        let mut visible = Vec::new();
+        for batch in batches.iter() {
+            visible.push(filter_batch_by_lsn(batch, max_lsn)?);
+        }
+        Ok(visible
+            .into_iter()
+            .filter(|batch| batch.num_rows() > 0)
+            .collect())
+    }
+
+    /// Serialize record batches as an Arrow IPC stream.
+    pub fn record_batches_to_arrow_ipc(&self, batches: &[RecordBatch]) -> Result<Option<Vec<u8>>> {
+        let Some(first) = batches.first() else {
+            return Ok(None);
+        };
+
+        let mut bytes = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut bytes, &first.schema())
+                .map_err(|e| Error::Buffer(BufferError::ArrowConversion(e.to_string())))?;
+            for batch in batches {
+                writer
+                    .write(batch)
+                    .map_err(|e| Error::Buffer(BufferError::ArrowConversion(e.to_string())))?;
+            }
+            writer
+                .finish()
+                .map_err(|e| Error::Buffer(BufferError::ArrowConversion(e.to_string())))?;
+        }
+
+        Ok(Some(bytes))
+    }
+
+    /// Serialize buffered records as an Arrow IPC stream.
+    pub fn records_to_arrow_ipc(&self, records: &[BufferedRecord]) -> Result<Option<Vec<u8>>> {
+        let Some(batch) = self.records_to_record_batch(records)? else {
+            return Ok(None);
+        };
+
+        let mut bytes = Vec::new();
+        {
+            let schema = self.schema.read().clone();
+            let mut writer = StreamWriter::try_new(&mut bytes, &schema)
+                .map_err(|e| Error::Buffer(BufferError::ArrowConversion(e.to_string())))?;
+            writer
+                .write(&batch)
+                .map_err(|e| Error::Buffer(BufferError::ArrowConversion(e.to_string())))?;
+            writer
+                .finish()
+                .map_err(|e| Error::Buffer(BufferError::ArrowConversion(e.to_string())))?;
+        }
+
+        Ok(Some(bytes))
+    }
+
+    /// Serialize the buffer schema as an Arrow IPC stream with no rows.
+    pub fn schema_to_arrow_ipc(&self) -> Result<Vec<u8>> {
+        let schema = self.schema.read().clone();
+        let mut bytes = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut bytes, &schema)
+                .map_err(|e| Error::Buffer(BufferError::ArrowConversion(e.to_string())))?;
+            writer
+                .finish()
+                .map_err(|e| Error::Buffer(BufferError::ArrowConversion(e.to_string())))?;
+        }
+        Ok(bytes)
+    }
+
+    fn records_to_record_batch(&self, records: &[BufferedRecord]) -> Result<Option<RecordBatch>> {
+        if records.is_empty() {
+            return Ok(None);
+        }
+
+        let mut key_builder = BinaryBuilder::new();
+        let mut value_builder = BinaryBuilder::new();
+        let mut topic_builder = StringBuilder::new();
+        let mut partition_builder = Int32Builder::new();
+        let mut offset_builder = Int64Builder::new();
+        let mut timestamp_builder = Int64Builder::new();
+        let mut read_lsn_builder = UInt64Builder::new();
+
+        for record in records {
+            match &record.key {
+                Some(key) => key_builder.append_value(key),
+                None => key_builder.append_null(),
+            }
+            match &record.value {
+                Some(value) => value_builder.append_value(value),
+                None => value_builder.append_null(),
+            }
+            topic_builder.append_value(&record.topic);
+            partition_builder.append_value(record.partition);
+            offset_builder.append_value(record.offset);
+            timestamp_builder.append_value(record.timestamp);
+            read_lsn_builder.append_value(record.read_lsn);
+        }
+
+        let batch = RecordBatch::try_new(
+            self.schema.read().clone(),
+            vec![
+                Arc::new(key_builder.finish()),
+                Arc::new(value_builder.finish()),
+                Arc::new(topic_builder.finish()),
+                Arc::new(partition_builder.finish()),
+                Arc::new(offset_builder.finish()),
+                Arc::new(timestamp_builder.finish()),
+                Arc::new(read_lsn_builder.finish()),
+            ],
+        )
+        .map_err(|e| Error::Buffer(BufferError::ArrowConversion(e.to_string())))?;
+
         Ok(Some(batch))
     }
 
     /// Get buffer statistics.
     pub fn stats(&self) -> HotBufferStats {
         let builders = self.builders.read();
+        let row_count = if builders.row_count > 0 {
+            builders.row_count
+        } else {
+            self.records.read().len()
+        };
         HotBufferStats {
-            row_count: builders.row_count,
-            memory_bytes: builders.memory_bytes,
+            row_count,
+            memory_bytes: builders.memory_bytes + self.decoded_memory_bytes.load(Ordering::Relaxed),
             total_records: self.stats.total_records.load(Ordering::Relaxed),
             total_flushes: self.stats.flushes.load(Ordering::Relaxed),
             age_seconds: self.created_at.elapsed().as_secs(),
@@ -472,8 +755,36 @@ impl HotBuffer {
 
     /// Get the Arrow schema.
     pub fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+        self.schema.read().clone()
     }
+}
+
+pub(crate) fn filter_batch_by_lsn(
+    batch: &RecordBatch,
+    max_lsn: Option<u64>,
+) -> Result<RecordBatch> {
+    let Some(max_lsn) = max_lsn else {
+        return Ok(batch.clone());
+    };
+
+    let read_lsn = batch
+        .column_by_name("read_lsn")
+        .or_else(|| batch.column_by_name("_k2i_read_lsn"))
+        .and_then(|column| column.as_any().downcast_ref::<UInt64Array>())
+        .ok_or_else(|| {
+            Error::Buffer(BufferError::SchemaMismatch {
+                expected: "UInt64 read_lsn column".to_string(),
+                actual: format!("{:?}", batch.schema()),
+            })
+        })?;
+
+    let mask = BooleanArray::from(
+        (0..read_lsn.len())
+            .map(|idx| read_lsn.value(idx) <= max_lsn)
+            .collect::<Vec<_>>(),
+    );
+    filter_record_batch(batch, &mask)
+        .map_err(|e| Error::Buffer(BufferError::ArrowConversion(e.to_string())))
 }
 
 impl ColumnBuilders {
@@ -485,6 +796,7 @@ impl ColumnBuilders {
             partition_builder: Int32Builder::new(),
             offset_builder: Int64Builder::new(),
             timestamp_builder: Int64Builder::new(),
+            read_lsn_builder: UInt64Builder::new(),
             row_count: 0,
             memory_bytes: 0,
         }
@@ -585,8 +897,9 @@ mod tests {
             buffer.append(&msg).unwrap();
         }
 
-        let batch = buffer.take_snapshot().unwrap().unwrap();
-        assert_eq!(batch.num_rows(), 100);
+        let snapshot = buffer.take_snapshot().unwrap().unwrap();
+        assert_eq!(snapshot.batch.num_rows(), 100);
+        assert_eq!(snapshot.records.len(), 100);
 
         // Buffer should be empty after snapshot
         assert_eq!(buffer.row_count(), 0);
@@ -598,6 +911,23 @@ mod tests {
         let buffer = create_test_buffer();
         let batch = buffer.take_snapshot().unwrap();
         assert!(batch.is_none());
+    }
+
+    #[test]
+    fn test_read_lsn_snapshot_filter() {
+        let buffer = create_test_buffer();
+
+        for i in 0..5 {
+            let msg = create_test_message(i);
+            buffer.append_with_lsn(&msg, i as u64 + 1).unwrap();
+        }
+
+        let records = buffer.snapshot_records_for_read(Some(3));
+        let lsns: Vec<u64> = records.iter().map(|record| record.read_lsn).collect();
+        assert_eq!(lsns, vec![1, 2, 3]);
+
+        let ipc = buffer.records_to_arrow_ipc(&records).unwrap();
+        assert!(ipc.is_some());
     }
 
     // ========================================================================

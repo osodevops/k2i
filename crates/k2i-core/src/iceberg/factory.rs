@@ -15,6 +15,7 @@ use crate::{Error, IcebergError, Result};
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use reqwest::{Client, StatusCode};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
@@ -91,6 +92,25 @@ pub trait CatalogOperations: Send + Sync {
         commit: SnapshotCommit,
     ) -> Result<SnapshotCommitResult>;
 
+    /// Commit a new current table schema.
+    ///
+    /// Catalogs that do not implement Iceberg table-update commits return an
+    /// explicit schema-evolution error so ingestion can pause before advancing
+    /// Kafka offsets.
+    async fn update_schema(
+        &self,
+        namespace: &str,
+        table: &str,
+        schema: &TableSchema,
+        expected_schema_id: Option<i32>,
+    ) -> Result<TableInfo> {
+        let _ = (namespace, table, schema, expected_schema_id);
+        Err(Error::Iceberg(IcebergError::SchemaEvolution(format!(
+            "{:?} catalog does not support schema update commits",
+            self.catalog_type()
+        ))))
+    }
+
     /// Get the catalog type.
     fn catalog_type(&self) -> CatalogType;
 
@@ -115,7 +135,7 @@ pub struct CatalogHealth {
 }
 
 /// Information about an Iceberg table.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TableInfo {
     /// Namespace (database)
     pub namespace: String,
@@ -132,7 +152,7 @@ pub struct TableInfo {
 }
 
 /// Iceberg table schema representation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TableSchema {
     /// Schema ID
     pub schema_id: i32,
@@ -141,7 +161,7 @@ pub struct TableSchema {
 }
 
 /// Schema field information.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SchemaFieldInfo {
     /// Field ID
     pub id: i32,
@@ -220,6 +240,7 @@ impl CatalogFactoryRegistry {
         registry.register(Box::new(super::nessie::NessieCatalogFactory));
         registry.register(Box::new(super::glue::GlueCatalogFactory));
         registry.register(Box::new(super::hive::HiveCatalogFactory));
+        registry.register(Box::new(super::sql::SqlCatalogFactory));
         registry
     }
 
@@ -578,6 +599,16 @@ impl RestCatalogClient {
         }
     }
 
+    fn convert_current_schema(&self, metadata: &rest_api::TableMetadata) -> Result<TableSchema> {
+        let schema = metadata.current_schema().ok_or_else(|| {
+            Error::Iceberg(IcebergError::Other(format!(
+                "REST catalog table metadata at {} has no current schema",
+                metadata.location
+            )))
+        })?;
+        Ok(self.convert_schema(schema))
+    }
+
     /// Convert our TableSchema to API schema.
     fn to_api_schema(&self, schema: &TableSchema) -> rest_api::Schema {
         rest_api::Schema {
@@ -589,13 +620,23 @@ impl RestCatalogClient {
                 .map(|f| rest_api::SchemaField {
                     id: f.id,
                     name: f.name.clone(),
-                    field_type: serde_json::Value::String(f.field_type.clone()),
+                    field_type: schema_type_to_api_value(&f.field_type),
                     required: f.required,
                     doc: f.doc.clone(),
                 })
                 .collect(),
             identifier_field_ids: vec![],
         }
+    }
+}
+
+fn schema_type_to_api_value(field_type: &str) -> serde_json::Value {
+    let trimmed = field_type.trim();
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        serde_json::from_str(trimmed)
+            .unwrap_or_else(|_| serde_json::Value::String(field_type.to_string()))
+    } else {
+        serde_json::Value::String(field_type.to_string())
     }
 }
 
@@ -772,13 +813,14 @@ impl CatalogOperations for RestCatalogClient {
             .json()
             .await
             .map_err(|e| Error::Iceberg(IcebergError::Other(e.to_string())))?;
+        let schema = self.convert_current_schema(&table_response.metadata)?;
 
         Ok(TableInfo {
             namespace: namespace.to_string(),
             name: table.to_string(),
             location: table_response.metadata.location,
             current_snapshot_id: table_response.metadata.current_snapshot_id,
-            schema: self.convert_schema(&table_response.metadata.schema),
+            schema,
             properties: table_response.metadata.properties,
         })
     }
@@ -815,6 +857,7 @@ impl CatalogOperations for RestCatalogClient {
             .json()
             .await
             .map_err(|e| Error::Iceberg(IcebergError::Other(e.to_string())))?;
+        let schema = self.convert_current_schema(&table_response.metadata)?;
 
         info!(namespace = %namespace, table = %table, "Created table");
 
@@ -823,7 +866,7 @@ impl CatalogOperations for RestCatalogClient {
             name: table.to_string(),
             location: table_response.metadata.location,
             current_snapshot_id: table_response.metadata.current_snapshot_id,
-            schema: self.convert_schema(&table_response.metadata.schema),
+            schema,
             properties: table_response.metadata.properties,
         })
     }
@@ -946,6 +989,81 @@ impl CatalogOperations for RestCatalogClient {
         })
     }
 
+    async fn update_schema(
+        &self,
+        namespace: &str,
+        table: &str,
+        schema: &TableSchema,
+        expected_schema_id: Option<i32>,
+    ) -> Result<TableInfo> {
+        let encoded_ns = urlencoding::encode(namespace);
+        let encoded_table = urlencoding::encode(table);
+        let path = format!("/v1/namespaces/{}/tables/{}", encoded_ns, encoded_table);
+
+        let mut requirements = Vec::new();
+        if let Some(current_schema_id) = expected_schema_id {
+            requirements
+                .push(rest_api::TableRequirement::AssertCurrentSchemaId { current_schema_id });
+        }
+
+        let last_column_id = schema.fields.iter().map(|field| field.id).max();
+        let updates = vec![
+            rest_api::TableUpdate::AddSchema {
+                schema: self.to_api_schema(schema),
+                last_column_id,
+            },
+            rest_api::TableUpdate::SetCurrentSchema {
+                schema_id: schema.schema_id,
+            },
+        ];
+
+        let request_body = rest_api::CommitTableRequest {
+            identifier: None,
+            requirements,
+            updates,
+        };
+
+        let request = self.build_request(reqwest::Method::POST, &path).await?;
+        let response = self.execute_request(request.json(&request_body)).await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+
+            if status == StatusCode::CONFLICT {
+                return Err(Error::Iceberg(IcebergError::SchemaEvolution(format!(
+                    "schema update conflict for {}.{} while moving to schema ID {}",
+                    namespace, table, schema.schema_id
+                ))));
+            }
+
+            return Err(self.handle_error_response(status, &body));
+        }
+
+        let commit_response: rest_api::CommitTableResponse = response
+            .json()
+            .await
+            .map_err(|e| Error::Iceberg(IcebergError::Other(e.to_string())))?;
+        let committed_schema = self.convert_current_schema(&commit_response.metadata)?;
+
+        info!(
+            namespace = %namespace,
+            table = %table,
+            schema_id = schema.schema_id,
+            field_count = schema.fields.len(),
+            "Schema update committed to REST catalog"
+        );
+
+        Ok(TableInfo {
+            namespace: namespace.to_string(),
+            name: table.to_string(),
+            location: commit_response.metadata.location,
+            current_snapshot_id: commit_response.metadata.current_snapshot_id,
+            schema: committed_schema,
+            properties: commit_response.metadata.properties,
+        })
+    }
+
     fn catalog_type(&self) -> CatalogType {
         CatalogType::Rest
     }
@@ -1001,6 +1119,8 @@ mod tests {
             rest: Default::default(),
             glue: Default::default(),
             nessie: None,
+            sql_catalog: None,
+            object_store: Default::default(),
         };
 
         let result = factory.create(&config).await;
@@ -1029,6 +1149,8 @@ mod tests {
             rest: Default::default(),
             glue: Default::default(),
             nessie: None,
+            sql_catalog: None,
+            object_store: Default::default(),
         };
 
         let result = factory.create(&config).await;
@@ -1060,6 +1182,8 @@ mod tests {
             rest: Default::default(),
             glue: Default::default(),
             nessie: None,
+            sql_catalog: None,
+            object_store: Default::default(),
         };
 
         // Create client - note this is now async

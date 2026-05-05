@@ -1,0 +1,18 @@
+services:
+  kafka-init:
+    environment:
+      K2I_E2E_PARTITIONS: "${K2I_E2E_LOAD_PARTITIONS:-4}"
+
+  k2i:
+    volumes:
+      - ./k2i.iceberg.load.toml:/etc/k2i/config.toml:ro
+      - k2i-warehouse:/var/lib/k2i/warehouse
+      - k2i-txlog:/var/lib/k2i/txlog
+      - k2i-run:/var/run/k2i
+
+  e2e-runner:
+    environment:
+      K2I_E2E_MODE: iceberg-load
+      K2I_E2E_LOAD_MESSAGES: "${K2I_E2E_LOAD_MESSAGES:-100000}"
+      K2I_E2E_LOAD_CONCURRENCY: "${K2I_E2E_LOAD_CONCURRENCY:-2000}"
+      K2I_E2E_LOAD_TIMEOUT_SECONDS: "${K2I_E2E_LOAD_TIMEOUT_SECONDS:-600}"

@@ -332,16 +332,19 @@ impl IngestionMetrics {
     /// let metrics = IngestionMetrics::new();
     /// metrics.record_message();
     /// let text = metrics.export_prometheus_text();
-    /// assert!(text.contains("k2i_messages_total 1"));
+    /// assert!(text.contains("k2i_messages_consumed_total 1"));
     /// ```
     pub fn export_prometheus_text(&self) -> String {
         let mut output = String::with_capacity(4096);
 
         // === COUNTERS ===
 
-        output.push_str("# HELP k2i_messages_total Total messages consumed from Kafka\n");
-        output.push_str("# TYPE k2i_messages_total counter\n");
-        output.push_str(&format!("k2i_messages_total {}\n", self.messages_total()));
+        output.push_str("# HELP k2i_messages_consumed_total Total messages consumed from Kafka\n");
+        output.push_str("# TYPE k2i_messages_consumed_total counter\n");
+        output.push_str(&format!(
+            "k2i_messages_consumed_total {}\n",
+            self.messages_total()
+        ));
         output.push('\n');
 
         output.push_str("# HELP k2i_errors_total Total errors encountered\n");
@@ -394,10 +397,10 @@ impl IngestionMetrics {
         ));
         output.push('\n');
 
-        output.push_str("# HELP k2i_backpressure_total Total backpressure events\n");
-        output.push_str("# TYPE k2i_backpressure_total counter\n");
+        output.push_str("# HELP k2i_backpressure_events_total Total backpressure events\n");
+        output.push_str("# TYPE k2i_backpressure_events_total counter\n");
         output.push_str(&format!(
-            "k2i_backpressure_total {}\n",
+            "k2i_backpressure_events_total {}\n",
             self.backpressure_total()
         ));
         output.push('\n');
@@ -481,12 +484,15 @@ impl IngestionMetrics {
         // === COUNTERS ===
 
         output.push_str(&format!(
-            "# HELP {}_messages_total Total messages consumed from Kafka\n",
+            "# HELP {}_messages_consumed_total Total messages consumed from Kafka\n",
             prefix
         ));
-        output.push_str(&format!("# TYPE {}_messages_total counter\n", prefix));
         output.push_str(&format!(
-            "{}_messages_total {}\n",
+            "# TYPE {}_messages_consumed_total counter\n",
+            prefix
+        ));
+        output.push_str(&format!(
+            "{}_messages_consumed_total {}\n",
             prefix,
             self.messages_total()
         ));
@@ -568,12 +574,15 @@ impl IngestionMetrics {
         output.push('\n');
 
         output.push_str(&format!(
-            "# HELP {}_backpressure_total Total backpressure events\n",
+            "# HELP {}_backpressure_events_total Total backpressure events\n",
             prefix
         ));
-        output.push_str(&format!("# TYPE {}_backpressure_total counter\n", prefix));
         output.push_str(&format!(
-            "{}_backpressure_total {}\n",
+            "# TYPE {}_backpressure_events_total counter\n",
+            prefix
+        ));
+        output.push_str(&format!(
+            "{}_backpressure_events_total {}\n",
             prefix,
             self.backpressure_total()
         ));
@@ -829,9 +838,9 @@ mod tests {
         let output = metrics.export_prometheus_text();
 
         // Verify counters
-        assert!(output.contains("# HELP k2i_messages_total"));
-        assert!(output.contains("# TYPE k2i_messages_total counter"));
-        assert!(output.contains("k2i_messages_total 100"));
+        assert!(output.contains("# HELP k2i_messages_consumed_total"));
+        assert!(output.contains("# TYPE k2i_messages_consumed_total counter"));
+        assert!(output.contains("k2i_messages_consumed_total 100"));
 
         assert!(output.contains("k2i_errors_total 3"));
 
@@ -843,7 +852,7 @@ mod tests {
         assert!(output.contains("k2i_errors{type=\"storage\"} 0"));
         assert!(output.contains("k2i_flushes_total 1"));
         assert!(output.contains("k2i_rows_flushed_total 500"));
-        assert!(output.contains("k2i_backpressure_total 1"));
+        assert!(output.contains("k2i_backpressure_events_total 1"));
         assert!(output.contains("k2i_iceberg_commits_total 1"));
 
         // Verify gauges
@@ -868,8 +877,8 @@ mod tests {
 
         let output = metrics.export_prometheus_text_with_prefix("custom_app");
 
-        assert!(output.contains("# HELP custom_app_messages_total"));
-        assert!(output.contains("custom_app_messages_total 42"));
+        assert!(output.contains("# HELP custom_app_messages_consumed_total"));
+        assert!(output.contains("custom_app_messages_consumed_total 42"));
         assert!(output.contains("custom_app_buffer_size_bytes"));
         assert!(output.contains("custom_app_flush_duration_seconds_bucket"));
     }
@@ -880,7 +889,7 @@ mod tests {
         let output = metrics.export_prometheus_text();
 
         // All counters should be 0
-        assert!(output.contains("k2i_messages_total 0"));
+        assert!(output.contains("k2i_messages_consumed_total 0"));
         assert!(output.contains("k2i_errors_total 0"));
         assert!(output.contains("k2i_flushes_total 0"));
 

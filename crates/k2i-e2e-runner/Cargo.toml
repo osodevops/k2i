@@ -1,0 +1,23 @@
+[package]
+name = "k2i-e2e-runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Docker end-to-end test runner for K2I"
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+arrow.workspace = true
+arrow-ipc.workspace = true
+bytes.workspace = true
+futures.workspace = true
+k2i-rpc.workspace = true
+prost.workspace = true
+rdkafka.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true

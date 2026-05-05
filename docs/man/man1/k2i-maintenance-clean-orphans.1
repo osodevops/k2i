@@ -1,0 +1,17 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH k2i-maintenance-clean-orphans 1  "k2i-maintenance-clean-orphans "
+.SH NAME
+k2i\-maintenance\-clean\-orphans \- Clean up orphan files
+.SH SYNOPSIS
+\fBk2i\-maintenance\-clean\-orphans\fR [\fB\-h\fR|\fB\-\-help\fR]
+.SH DESCRIPTION
+Clean up orphan files
+.SH OPTIONS
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.SH EXTRA
+BEHAVIOR:
+  Compares files present in the warehouse with files referenced by table
+  snapshots and deletes orphan files older than orphan_retention_days.

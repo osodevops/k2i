@@ -4,8 +4,7 @@ use crate::server::{start_server, ServerState};
 use anyhow::Result;
 use k2i_core::engine::IngestionEngine;
 use k2i_core::Config;
-use std::sync::Arc;
-use tracing::info;
+use tracing::{error, info};
 
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
@@ -36,23 +35,14 @@ pub async fn run(
 
     let health_port = config.monitoring.health_port;
     let metrics_port = config.monitoring.metrics_port;
+    let rpc_config = config.rpc.clone();
 
     let mut engine = IngestionEngine::new(config).await?;
     let shutdown_tx = engine.shutdown_signal();
 
-    // Get references to health and metrics for the HTTP server
-    let health = Arc::new(k2i_core::health::HealthCheck::new());
-    health.register_component("kafka");
-    health.register_component("buffer");
-    health.register_component("iceberg");
-    health.register_component("txlog");
-    health.mark_healthy("txlog"); // Transaction log is healthy if we got this far
-
-    let metrics = Arc::new(k2i_core::metrics::IngestionMetrics::new());
-
-    let server_state = Arc::new(ServerState {
-        health: Arc::clone(&health),
-        metrics: Arc::clone(&metrics),
+    let server_state = std::sync::Arc::new(ServerState {
+        health: engine.health(),
+        metrics: engine.metrics(),
     });
 
     // Start HTTP servers
@@ -63,6 +53,18 @@ pub async fn run(
         metrics_port,
         server_shutdown_rx,
     ));
+
+    if rpc_config.enabled {
+        let registry = engine.read_registry();
+        let rpc_shutdown_rx = shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            if let Err(err) =
+                k2i_rpc_server::start_rpc_server(registry, rpc_config, rpc_shutdown_rx).await
+            {
+                error!(error = %err, "K2I read RPC server stopped with error");
+            }
+        });
+    }
 
     // Spawn a task to handle shutdown signals (SIGINT and SIGTERM)
     let shutdown_signal = shutdown_tx.clone();

@@ -810,6 +810,8 @@ mod tests {
                 catalog_id: None,
             },
             nessie: None,
+            sql_catalog: None,
+            object_store: Default::default(),
         }
     }
 

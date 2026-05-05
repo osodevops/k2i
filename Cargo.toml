@@ -3,10 +3,13 @@ resolver = "2"
 members = [
     "crates/k2i-core",
     "crates/k2i-cli",
+    "crates/k2i-rpc",
+    "crates/k2i-rpc-server",
+    "crates/k2i-e2e-runner",
 ]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 license = "Apache-2.0"
 authors = ["OSO DevOps"]
@@ -20,11 +23,17 @@ rdkafka = { version = "0.38", features = ["cmake-build", "ssl"] }
 
 # Arrow ecosystem
 arrow = { version = "54", features = ["csv", "json", "prettyprint"] }
+arrow-ipc = "54"
+arrow-json = "54"
+arrow-select = "54"
 parquet = { version = "54", features = ["snap", "async"] }
 
 # Iceberg (official Apache implementation)
 iceberg = "0.7"
 iceberg-catalog-rest = "0.7"
+
+# SQL
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "any", "sqlite", "postgres", "migrate"] }
 
 # Object storage
 object_store = { version = "0.11", features = ["aws", "azure", "gcp", "http"] }
@@ -42,6 +51,7 @@ faststr = "0.2"
 
 # Async runtime
 tokio = { version = "1", features = ["full", "tracing"] }
+tokio-util = { version = "0.7", features = ["codec"] }
 futures = "0.3"
 async-trait = "0.1"
 
@@ -50,10 +60,17 @@ dashmap = "6"
 parking_lot = "0.12"
 
 # Configuration & CLI
-clap = { version = "4", features = ["derive", "env"] }
+clap = { version = "4", features = ["derive", "env", "string"] }
+clap_complete = "4"
+clap_mangen = "0.2"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 serde_json = "1"
+bincode = "1.3"
+prost = "0.14"
+prost-types = "0.14"
+prost-reflect = { version = "0.16", features = ["serde"] }
+protox = "0.9"
 
 # Error handling
 thiserror = "2"
@@ -77,9 +94,11 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # Utilities
 uuid = { version = "1", features = ["v4"] }
 bytes = "1"
+base64 = "0.22"
 url = "2"
 urlencoding = "2"
 crc32fast = "1.4"
+glob = "0.3"
 
 # Testing
 testcontainers = "0.23"
@@ -91,6 +110,8 @@ criterion = "0.5"
 
 # Internal crates
 k2i-core = { path = "crates/k2i-core" }
+k2i-rpc = { path = "crates/k2i-rpc" }
+k2i-rpc-server = { path = "crates/k2i-rpc-server" }
 
 [profile.release]
 lto = "thin"

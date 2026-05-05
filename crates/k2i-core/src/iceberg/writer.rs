@@ -20,6 +20,7 @@
 use crate::config::{IcebergConfig, ParquetCompression};
 use crate::iceberg::factory::{CatalogOperations, DataFileInfo, SnapshotCommit};
 use crate::iceberg::metadata_cache::SharedMetadataCache;
+use crate::iceberg::official::{OfficialCommitResult, OfficialRestCommitter};
 use crate::iceberg::table_manager::TableManager;
 use crate::iceberg::transaction_coordinator::TransactionCoordinator;
 use crate::txlog::{TransactionEntry, TransactionLog};
@@ -59,11 +60,27 @@ pub struct WriteStats {
     pub file_path: String,
     /// Snapshot ID
     pub snapshot_id: i64,
+    /// Real manifest-list path when the commit used official Iceberg metadata.
+    pub manifest_list_path: Option<String>,
+    /// Kafka topic represented by this file.
+    pub topic: String,
+    /// Kafka partition represented by this file.
+    pub kafka_partition: i32,
+    /// Minimum Kafka offset in this file.
+    pub min_offset: i64,
+    /// Maximum Kafka offset in this file.
+    pub max_offset: i64,
+    /// Minimum table read LSN in this file.
+    pub min_lsn: u64,
+    /// Maximum table read LSN in this file.
+    pub max_lsn: u64,
 }
 
 /// Partition information for dual partitioning (Kafka + Iceberg).
 #[derive(Debug, Clone)]
 pub struct PartitionInfo {
+    /// Kafka topic
+    pub topic: String,
     /// Kafka partition number
     pub kafka_partition: i32,
     /// Event timestamp (Unix epoch milliseconds)
@@ -72,6 +89,25 @@ pub struct PartitionInfo {
     pub min_offset: i64,
     /// Max offset in this batch
     pub max_offset: i64,
+    /// Min table read LSN in this batch
+    pub min_lsn: u64,
+    /// Max table read LSN in this batch
+    pub max_lsn: u64,
+}
+
+#[derive(Debug, Clone)]
+struct CatalogCommitOutcome {
+    snapshot_id: i64,
+    manifest_list_path: Option<String>,
+}
+
+impl From<OfficialCommitResult> for CatalogCommitOutcome {
+    fn from(result: OfficialCommitResult) -> Self {
+        Self {
+            snapshot_id: result.snapshot_id,
+            manifest_list_path: Some(result.manifest_list_path),
+        }
+    }
 }
 
 /// Iceberg writer with atomic commit support.
@@ -89,6 +125,8 @@ pub struct IcebergWriter {
     transaction_coordinator: Option<Arc<TransactionCoordinator>>,
     /// Optional metadata cache
     metadata_cache: Option<SharedMetadataCache>,
+    /// Optional official Iceberg metadata committer for REST catalogs.
+    official_committer: Option<OfficialRestCommitter>,
 }
 
 /// Builder for IcebergWriter.
@@ -150,6 +188,11 @@ impl IcebergWriterBuilder {
     /// Build the IcebergWriter.
     pub async fn build(self) -> Result<IcebergWriter> {
         let object_store = IcebergWriter::create_object_store(&self.config)?;
+        let official_committer = if OfficialRestCommitter::is_enabled(&self.config) {
+            Some(OfficialRestCommitter::new(&self.config).await?)
+        } else {
+            None
+        };
 
         Ok(IcebergWriter {
             config: self.config,
@@ -160,6 +203,7 @@ impl IcebergWriterBuilder {
             table_manager: self.table_manager,
             transaction_coordinator: self.transaction_coordinator,
             metadata_cache: self.metadata_cache,
+            official_committer,
         })
     }
 }
@@ -318,8 +362,10 @@ impl IcebergWriter {
         let file_path = self.generate_file_path(&partition_info);
 
         debug!(
+            topic = %partition_info.topic,
             kafka_partition = partition_info.kafka_partition,
             offset_range = %format!("{}-{}", partition_info.min_offset, partition_info.max_offset),
+            lsn_range = %format!("{}-{}", partition_info.min_lsn, partition_info.max_lsn),
             "Extracted partition info for dual partitioning"
         );
 
@@ -375,7 +421,7 @@ impl IcebergWriter {
 
         // Step 3: Commit to Iceberg catalog with partition info
         let commit_start = Instant::now();
-        let snapshot_id = self
+        let commit_outcome = self
             .commit_to_catalog(
                 &file_path,
                 file_size_bytes as u64,
@@ -385,16 +431,25 @@ impl IcebergWriter {
             )
             .await?;
         let commit_duration = commit_start.elapsed();
+        let snapshot_id = commit_outcome.snapshot_id;
 
         // Log snapshot if txlog configured
         if let Some(ref txlog) = self.txlog {
+            let manifest_list_path =
+                commit_outcome
+                    .manifest_list_path
+                    .clone()
+                    .unwrap_or_else(|| {
+                        format!(
+                            "{}/metadata/snap-{}.avro",
+                            self.config.warehouse_path, snapshot_id
+                        )
+                    });
+
             txlog.append(TransactionEntry::IcebergSnapshot {
                 batch_id: batch_id.clone(),
                 snapshot_id,
-                manifest_list_path: format!(
-                    "{}/metadata/snap-{}.avro",
-                    self.config.warehouse_path, snapshot_id
-                ),
+                manifest_list_path,
                 row_count_total: row_count as u64,
                 timestamp: chrono::Utc::now(),
             })?;
@@ -431,6 +486,13 @@ impl IcebergWriter {
             total_duration,
             file_path,
             snapshot_id,
+            manifest_list_path: commit_outcome.manifest_list_path,
+            topic: partition_info.topic,
+            kafka_partition: partition_info.kafka_partition,
+            min_offset: partition_info.min_offset,
+            max_offset: partition_info.max_offset,
+            min_lsn: partition_info.min_lsn,
+            max_lsn: partition_info.max_lsn,
         })
     }
 
@@ -507,9 +569,34 @@ impl IcebergWriter {
         row_count: u64,
         kafka_offset: i64,
         partition_info: &PartitionInfo,
-    ) -> Result<i64> {
+    ) -> Result<CatalogCommitOutcome> {
         let namespace = &self.config.database_name;
         let table = &self.config.table_name;
+
+        if let Some(ref committer) = self.official_committer {
+            let data_file =
+                self.build_data_file_info(file_path, file_size_bytes, row_count, partition_info);
+            let summary = Self::build_commit_summary(row_count, kafka_offset);
+            let result = committer
+                .commit_append(namespace, table, vec![data_file], summary)
+                .await?;
+
+            if let Some(ref cache) = self.metadata_cache {
+                cache.set_snapshot_id(result.snapshot_id);
+            }
+
+            info!(
+                namespace = %namespace,
+                table = %table,
+                snapshot_id = result.snapshot_id,
+                manifest_list = %result.manifest_list_path,
+                file_path = %file_path,
+                kafka_offset = kafka_offset,
+                "Committed with official Iceberg metadata"
+            );
+
+            return Ok(result.into());
+        }
 
         // If we have catalog integration, use real catalog operations
         if let Some(ref catalog) = self.catalog {
@@ -534,7 +621,10 @@ impl IcebergWriter {
         );
 
         let snapshot_id = chrono::Utc::now().timestamp_millis();
-        Ok(snapshot_id)
+        Ok(CatalogCommitOutcome {
+            snapshot_id,
+            manifest_list_path: None,
+        })
     }
 
     /// Commit with real catalog operations.
@@ -546,7 +636,7 @@ impl IcebergWriter {
         row_count: u64,
         kafka_offset: i64,
         partition_info: &PartitionInfo,
-    ) -> Result<i64> {
+    ) -> Result<CatalogCommitOutcome> {
         let namespace = &self.config.database_name;
         let table = &self.config.table_name;
 
@@ -567,51 +657,9 @@ impl IcebergWriter {
             None => catalog.current_snapshot_id(namespace, table).await?,
         };
 
-        // Build partition values for dual partitioning (Kafka + Iceberg)
-        use crate::config::PartitionStrategy;
-        use chrono::{DateTime, Utc};
-
-        let event_time = DateTime::from_timestamp_millis(partition_info.event_timestamp_ms)
-            .unwrap_or_else(Utc::now);
-
-        let mut partition_values = HashMap::new();
-
-        // Add time-based partition value
-        match self.config.table_management.partition_strategy {
-            PartitionStrategy::Hourly => {
-                partition_values.insert(
-                    "event_hour".to_string(),
-                    event_time.format("%Y-%m-%d-%H").to_string(),
-                );
-            }
-            PartitionStrategy::Daily | PartitionStrategy::Identity | PartitionStrategy::Bucket => {
-                partition_values.insert(
-                    "event_date".to_string(),
-                    event_time.format("%Y-%m-%d").to_string(),
-                );
-            }
-        }
-
-        // Add Kafka partition value
-        partition_values.insert(
-            "kafka_partition".to_string(),
-            partition_info.kafka_partition.to_string(),
-        );
-
-        // Build the commit
-        let data_file = DataFileInfo {
-            file_path: file_path.to_string(),
-            file_size_bytes,
-            record_count: row_count,
-            partition_values,
-            file_format: "parquet".to_string(),
-        };
-
-        let mut summary = HashMap::new();
-        summary.insert("operation".to_string(), "append".to_string());
-        summary.insert("added-data-files".to_string(), "1".to_string());
-        summary.insert("added-records".to_string(), row_count.to_string());
-        summary.insert("kafka-offset".to_string(), kafka_offset.to_string());
+        let data_file =
+            self.build_data_file_info(file_path, file_size_bytes, row_count, partition_info);
+        let summary = Self::build_commit_summary(row_count, kafka_offset);
 
         let commit = SnapshotCommit {
             expected_snapshot_id,
@@ -654,7 +702,61 @@ impl IcebergWriter {
             "Committed to Iceberg catalog"
         );
 
-        Ok(result)
+        Ok(CatalogCommitOutcome {
+            snapshot_id: result,
+            manifest_list_path: None,
+        })
+    }
+
+    fn build_data_file_info(
+        &self,
+        file_path: &str,
+        file_size_bytes: u64,
+        row_count: u64,
+        partition_info: &PartitionInfo,
+    ) -> DataFileInfo {
+        use crate::config::PartitionStrategy;
+        use chrono::{DateTime, Utc};
+
+        let event_time = DateTime::from_timestamp_millis(partition_info.event_timestamp_ms)
+            .unwrap_or_else(Utc::now);
+
+        let mut partition_values = HashMap::new();
+        match self.config.table_management.partition_strategy {
+            PartitionStrategy::Hourly => {
+                partition_values.insert(
+                    "event_hour".to_string(),
+                    event_time.format("%Y-%m-%d-%H").to_string(),
+                );
+            }
+            PartitionStrategy::Daily | PartitionStrategy::Identity | PartitionStrategy::Bucket => {
+                partition_values.insert(
+                    "event_date".to_string(),
+                    event_time.format("%Y-%m-%d").to_string(),
+                );
+            }
+        }
+        partition_values.insert(
+            "kafka_partition".to_string(),
+            partition_info.kafka_partition.to_string(),
+        );
+
+        DataFileInfo {
+            file_path: file_path.to_string(),
+            file_size_bytes,
+            record_count: row_count,
+            partition_values,
+            file_format: "parquet".to_string(),
+        }
+    }
+
+    fn build_commit_summary(row_count: u64, kafka_offset: i64) -> HashMap<String, String> {
+        let mut summary = HashMap::new();
+        summary.insert("operation".to_string(), "append".to_string());
+        summary.insert("added-data-files".to_string(), "1".to_string());
+        summary.insert("added-records".to_string(), row_count.to_string());
+        summary.insert("kafka-offset".to_string(), kafka_offset.to_string());
+        summary
     }
 
     /// Generate a unique file path for a new Parquet file with dual partitioning.
@@ -706,7 +808,19 @@ impl IcebergWriter {
     ///
     /// Extracts kafka partition, timestamp, and offset range from the batch columns.
     fn extract_partition_info(&self, batch: &RecordBatch) -> Result<PartitionInfo> {
-        use arrow::array::{Int32Array, Int64Array};
+        use arrow::array::{Array, Int32Array, Int64Array, StringArray, UInt64Array};
+
+        let topic = batch
+            .column_by_name("topic")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .map(|arr| {
+                if !arr.is_empty() {
+                    arr.value(0).to_string()
+                } else {
+                    self.config.table_name.clone()
+                }
+            })
+            .unwrap_or_else(|| self.config.table_name.clone());
 
         // Extract partition column
         let kafka_partition = batch
@@ -721,8 +835,8 @@ impl IcebergWriter {
             .and_then(|c| c.as_any().downcast_ref::<Int64Array>())
             .map(|arr| {
                 if !arr.is_empty() {
-                    let min = arr.value(0);
-                    let max = arr.value(arr.len() - 1);
+                    let min = (0..arr.len()).map(|idx| arr.value(idx)).min().unwrap_or(0);
+                    let max = (0..arr.len()).map(|idx| arr.value(idx)).max().unwrap_or(0);
                     (min, max)
                 } else {
                     (0, 0)
@@ -743,11 +857,28 @@ impl IcebergWriter {
             })
             .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
 
+        let (min_lsn, max_lsn) = batch
+            .column_by_name("read_lsn")
+            .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())
+            .map(|arr| {
+                if !arr.is_empty() {
+                    let min = (0..arr.len()).map(|idx| arr.value(idx)).min().unwrap_or(0);
+                    let max = (0..arr.len()).map(|idx| arr.value(idx)).max().unwrap_or(0);
+                    (min, max)
+                } else {
+                    (0, 0)
+                }
+            })
+            .unwrap_or((0, 0));
+
         Ok(PartitionInfo {
+            topic,
             kafka_partition,
             event_timestamp_ms,
             min_offset,
             max_offset,
+            min_lsn,
+            max_lsn,
         })
     }
 
@@ -797,6 +928,8 @@ mod tests {
             rest: Default::default(),
             glue: Default::default(),
             nessie: None,
+            sql_catalog: None,
+            object_store: Default::default(),
         }
     }
 
@@ -868,16 +1001,22 @@ mod tests {
 
         // Create test partition info
         let partition_info1 = PartitionInfo {
+            topic: "test".to_string(),
             kafka_partition: 0,
             event_timestamp_ms: chrono::Utc::now().timestamp_millis(),
             min_offset: 100,
             max_offset: 200,
+            min_lsn: 1,
+            max_lsn: 2,
         };
         let partition_info2 = PartitionInfo {
+            topic: "test".to_string(),
             kafka_partition: 1,
             event_timestamp_ms: chrono::Utc::now().timestamp_millis(),
             min_offset: 300,
             max_offset: 400,
+            min_lsn: 3,
+            max_lsn: 4,
         };
 
         let path1 = writer.generate_file_path(&partition_info1);

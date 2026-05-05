@@ -1,0 +1,41 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH k2i-table-register 1  "k2i-table-register "
+.SH NAME
+k2i\-table\-register \- Register existing Parquet files without copying them
+.SH SYNOPSIS
+\fBk2i\-table\-register\fR <\fB\-\-database\fR> <\fB\-\-table\fR> <\fB\-\-source\fR> [\fB\-\-schema\-source\fR] [\fB\-\-message\-type\fR] [\fB\-\-kafka\-topic\fR] [\fB\-h\fR|\fB\-\-help\fR]
+.SH DESCRIPTION
+Register existing Parquet files without copying them
+.SH OPTIONS
+.TP
+\fB\-\-database\fR \fI<DATABASE>\fR
+Database/namespace name
+.TP
+\fB\-\-table\fR \fI<TABLE>\fR
+Table name
+.TP
+\fB\-\-source\fR \fI<SOURCES>\fR
+Source Parquet file, directory, or glob. Can be provided multiple times
+.TP
+\fB\-\-schema\-source\fR \fI<SCHEMA_SOURCE>\fR [default: first\-file]
+Schema source: first\-file or path to a .proto file
+.TP
+\fB\-\-message\-type\fR \fI<MESSAGE_TYPE>\fR
+Fully\-qualified Protobuf message type when \-\-schema\-source is a .proto file
+.TP
+\fB\-\-kafka\-topic\fR \fI<KAFKA_TOPIC>\fR
+Optional topic label for read\-state provenance
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.SH EXTRA
+EXAMPLES:
+  k2i table register \-\-config config.toml \-\-database f1 \-\-table derived_state \-\-source \*(Aq/data/historical/*.parquet\*(Aq
+  k2i table register \-\-config config.toml \-\-database f1 \-\-table derived_state \-\-source /data/historical \-\-schema\-source schemas/derived_state.proto \-\-message\-type f1.timing.v1.DerivedState
+
+BEHAVIOR:
+  Expands files, directories, and globs. Infers schema from the first Parquet
+  file unless a .proto schema source is supplied. Registers metadata through
+  the configured catalog path and records transaction\-log entries for recovery.
+  Source files are not copied.
