@@ -8,6 +8,9 @@ description = "Docker end-to-end test runner for K2I"
 repository.workspace = true
 rust-version.workspace = true
 
+[package.metadata.dist]
+dist = false
+
 [dependencies]
 anyhow.workspace = true
 arrow.workspace = true

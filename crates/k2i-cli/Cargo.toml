@@ -6,6 +6,7 @@ license.workspace = true
 authors.workspace = true
 description = "CLI tool for Kafka to Iceberg streaming ingestion"
 repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
 
 [[bin]]

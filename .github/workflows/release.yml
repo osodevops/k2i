@@ -361,8 +361,15 @@ jobs:
           git config --global user.name "${GITHUB_USER}"
           git config --global user.email "${GITHUB_EMAIL}"
 
+          seen_formulae="$(mktemp)"
           for release in $(echo "$PLAN" | jq --compact-output '.releases[] | select([.artifacts[] | endswith(".rb")] | any)'); do
             filename=$(echo "$release" | jq '.artifacts[] | select(endswith(".rb"))' --raw-output)
+            if grep -Fxq "$filename" "$seen_formulae"; then
+              echo "Formula/${filename} already handled; skipping duplicate dist release"
+              continue
+            fi
+            echo "$filename" >> "$seen_formulae"
+
             name=$(echo "$filename" | sed "s/\.rb$//")
             version=$(echo "$release" | jq .app_version --raw-output)
 
@@ -372,8 +379,13 @@ jobs:
             brew style --except-cops FormulaAudit/Homepage,FormulaAudit/Desc,FormulaAuditStrict --fix "Formula/${filename}" || true
 
             git add "Formula/${filename}"
-            git commit -m "${name} ${version}"
+            if git diff --cached --quiet; then
+              echo "Formula/${filename} has no changes to commit"
+            else
+              git commit -m "${name} ${version}"
+            fi
           done
+          git clean -fd Formula/
           git push
 
   announce:
