@@ -98,7 +98,7 @@ pub async fn commit_append_with_catalog(
     namespace: &str,
     table: &str,
     files: Vec<DataFileInfo>,
-    summary: HashMap<String, String>,
+    mut summary: HashMap<String, String>,
 ) -> Result<OfficialCommitResult> {
     use ::iceberg::transaction::{ApplyTransactionAction, Transaction};
     if files.is_empty() {
@@ -106,6 +106,16 @@ pub async fn commit_append_with_catalog(
             "cannot append an empty file set".into(),
         )));
     }
+
+    // Remove "operation" from the summary HashMap before passing to the
+    // official iceberg-rust crate.  The crate's Summary struct has `operation`
+    // as a named field plus `#[serde(flatten)] additional_properties`.  If
+    // "operation" is left in the HashMap, it gets serialized twice (once from
+    // the struct field, once from the flattened map), causing "duplicate field
+    // `operation`" errors in catalogs like Lakekeeper.
+    //
+    // See: https://github.com/apache/iceberg/issues/9837
+    summary.remove("operation");
 
     let ident = table_ident(namespace, table)?;
     let loaded = catalog
