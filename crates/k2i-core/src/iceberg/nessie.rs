@@ -631,13 +631,23 @@ impl CatalogOperations for NessieCatalogClient {
                 uuid::Uuid::new_v4()
             );
 
+            // Convert flat HashMap summary into structured Summary
+            let mut summary_props = commit.summary.clone();
+            let operation = summary_props
+                .remove("operation")
+                .unwrap_or_else(|| "append".to_string());
+            let summary = rest_api::Summary {
+                operation,
+                additional_properties: summary_props,
+            };
+
             let snapshot = rest_api::Snapshot {
                 snapshot_id: new_snapshot_id,
                 parent_snapshot_id: commit.expected_snapshot_id,
                 sequence_number: 1,
                 timestamp_ms,
                 manifest_list: manifest_list_path,
-                summary: commit.summary.clone(),
+                summary,
                 schema_id: Some(0),
             };
 

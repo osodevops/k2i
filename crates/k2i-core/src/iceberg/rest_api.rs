@@ -262,6 +262,43 @@ pub struct SortField {
     pub null_order: String,
 }
 
+/// Snapshot summary with named `operation` field.
+///
+/// Matches the Apache Iceberg REST Catalog spec where `operation` is a
+/// required named field and additional properties are flattened into the
+/// same JSON object.  This avoids the "duplicate field `operation`" error
+/// when committing to catalogs backed by `apache/iceberg-rust` (e.g.
+/// Lakekeeper, Nessie with the official client).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Summary {
+    /// The snapshot operation (append, overwrite, replace, delete)
+    pub operation: String,
+    /// Additional summary properties (added-data-files, added-records, etc.)
+    #[serde(flatten)]
+    pub additional_properties: HashMap<String, String>,
+}
+
+impl Summary {
+    /// Create a new summary with the given operation.
+    pub fn new(operation: impl Into<String>) -> Self {
+        Self {
+            operation: operation.into(),
+            additional_properties: HashMap::new(),
+        }
+    }
+
+    /// Insert an additional property.
+    pub fn insert(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.additional_properties.insert(key.into(), value.into());
+    }
+}
+
+impl Default for Summary {
+    fn default() -> Self {
+        Self::new("append")
+    }
+}
+
 /// Snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Snapshot {
@@ -282,7 +319,7 @@ pub struct Snapshot {
     pub manifest_list: String,
     /// Snapshot summary
     #[serde(default)]
-    pub summary: HashMap<String, String>,
+    pub summary: Summary,
     /// Schema ID
     #[serde(skip_serializing_if = "Option::is_none", rename = "schema-id")]
     pub schema_id: Option<i32>,
@@ -624,10 +661,12 @@ mod tests {
                 sequence_number: 1,
                 timestamp_ms: 1704672000000,
                 manifest_list: "s3://bucket/metadata/snap-100-uuid.avro".to_string(),
-                summary: HashMap::from([
-                    ("operation".to_string(), "append".to_string()),
-                    ("added-data-files".to_string(), "1".to_string()),
-                ]),
+                summary: Summary {
+                    operation: "append".to_string(),
+                    additional_properties: HashMap::from([
+                        ("added-data-files".to_string(), "1".to_string()),
+                    ]),
+                },
                 schema_id: Some(0),
             },
         };
@@ -635,6 +674,12 @@ mod tests {
         let json = serde_json::to_string(&update).unwrap();
         assert!(json.contains("add-snapshot"));
         assert!(json.contains("snapshot-id"));
+
+        // Verify operation is a top-level field, not inside a nested map
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let snapshot = &parsed["snapshot"];
+        assert_eq!(snapshot["summary"]["operation"], "append");
+        assert_eq!(snapshot["summary"]["added-data-files"], "1");
     }
 
     #[test]
