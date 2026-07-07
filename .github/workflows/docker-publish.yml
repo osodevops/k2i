@@ -94,3 +94,22 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  verify-public-pull:
+    name: Verify Public Pull
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Verify image can be pulled without credentials
+        run: |
+          set -euo pipefail
+
+          image="${REGISTRY}/${IMAGE_NAME}"
+
+          # This job intentionally does not log in to GHCR. A successful
+          # manifest lookup proves the documented image is public.
+          docker logout "${REGISTRY}" || true
+          docker manifest inspect "${image}:${GITHUB_REF_NAME}" >/dev/null
+          docker manifest inspect "${image}:latest" >/dev/null

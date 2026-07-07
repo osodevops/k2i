@@ -62,6 +62,11 @@ cargo build --release --target x86_64-apple-darwin
 
 ## Docker Deployment
 
+The published image is `ghcr.io/osodevops/k2i`. For anonymous pulls to work,
+the GHCR package visibility must be public; repository visibility alone is not
+enough. The Docker release workflow verifies unauthenticated manifest access for
+the release tag and `latest` after pushing.
+
 ### Dockerfile
 
 ```dockerfile
