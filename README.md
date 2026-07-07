@@ -152,6 +152,10 @@ docker pull ghcr.io/osodevops/k2i:latest
 docker run --rm -v /path/to/config:/etc/k2i ghcr.io/osodevops/k2i:latest ingest --config /etc/k2i/config.toml
 ```
 
+The GHCR package must be set to public separately from the GitHub repository
+visibility. Release CI verifies anonymous manifest access for the published tag
+and `latest`.
+
 ### From Source
 
 ```bash
