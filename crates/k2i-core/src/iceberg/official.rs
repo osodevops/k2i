@@ -487,5 +487,24 @@ mod tests {
         assert!(result.snapshot_id != 0);
         assert!(result.manifest_list_path.contains("/metadata/snap-"));
         assert!(result.manifest_list_path.ends_with(".avro"));
+
+        let table = catalog
+            .load_table(&table_ident("f1", "derived_state").unwrap())
+            .await
+            .expect("committed table metadata should reload after snapshot serialization");
+        let summary = table
+            .metadata()
+            .current_snapshot()
+            .expect("committed table should have a current snapshot")
+            .summary();
+        assert!(
+            !summary.additional_properties.contains_key("operation"),
+            "`operation` must not be forwarded as a flattened snapshot property"
+        );
+
+        let json = serde_json::to_string(summary).unwrap();
+        let round_tripped: ::iceberg::spec::Summary =
+            serde_json::from_str(&json).expect("snapshot summary should round-trip as JSON");
+        assert_eq!(round_tripped.operation, ::iceberg::spec::Operation::Append);
     }
 }

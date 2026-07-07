@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-07-07
+
+### Fixed
+
+- Fixed Iceberg REST snapshot commits failing against catalogs backed by `apache/iceberg-rust` when snapshot summary properties included `operation`.
+
 ## [0.2.0] - 2026-05-05
 
 ### Added

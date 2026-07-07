@@ -287,9 +287,30 @@ impl Summary {
         }
     }
 
+    /// Create a summary from flat snapshot properties.
+    ///
+    /// `operation` is lifted into the named field so it is not emitted again
+    /// through flattened additional properties.
+    pub fn from_properties(mut properties: HashMap<String, String>) -> Self {
+        let operation = properties
+            .remove("operation")
+            .unwrap_or_else(|| "append".to_string());
+
+        Self {
+            operation,
+            additional_properties: properties,
+        }
+    }
+
     /// Insert an additional property.
     pub fn insert(&mut self, key: impl Into<String>, value: impl Into<String>) {
-        self.additional_properties.insert(key.into(), value.into());
+        let key = key.into();
+        let value = value.into();
+        if key == "operation" {
+            self.operation = value;
+        } else {
+            self.additional_properties.insert(key, value);
+        }
     }
 }
 
@@ -653,6 +674,31 @@ mod tests {
     }
 
     #[test]
+    fn test_summary_lifts_operation_from_flat_properties() {
+        let mut summary = Summary::from_properties(HashMap::from([
+            ("operation".to_string(), "overwrite".to_string()),
+            ("added-data-files".to_string(), "1".to_string()),
+        ]));
+
+        assert_eq!(summary.operation, "overwrite");
+        assert!(!summary.additional_properties.contains_key("operation"));
+        assert_eq!(
+            summary.additional_properties["added-data-files"],
+            "1".to_string()
+        );
+
+        summary.insert("operation", "append");
+        summary.insert("added-records", "10");
+
+        assert_eq!(summary.operation, "append");
+        assert!(!summary.additional_properties.contains_key("operation"));
+        assert_eq!(summary.additional_properties["added-records"], "10");
+
+        let json = serde_json::to_string(&summary).unwrap();
+        assert_eq!(json.matches("\"operation\"").count(), 1);
+    }
+
+    #[test]
     fn test_table_update_serialization() {
         let update = TableUpdate::AddSnapshot {
             snapshot: Snapshot {
@@ -663,9 +709,10 @@ mod tests {
                 manifest_list: "s3://bucket/metadata/snap-100-uuid.avro".to_string(),
                 summary: Summary {
                     operation: "append".to_string(),
-                    additional_properties: HashMap::from([
-                        ("added-data-files".to_string(), "1".to_string()),
-                    ]),
+                    additional_properties: HashMap::from([(
+                        "added-data-files".to_string(),
+                        "1".to_string(),
+                    )]),
                 },
                 schema_id: Some(0),
             },

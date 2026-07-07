@@ -918,25 +918,13 @@ impl CatalogOperations for RestCatalogClient {
                 uuid::Uuid::new_v4()
             );
 
-            // Convert the flat HashMap summary into the structured Summary
-            // expected by the Iceberg REST Catalog spec. The "operation" field
-            // must be a named field, not buried in additional_properties.
-            let mut summary_props = commit.summary.clone();
-            let operation = summary_props
-                .remove("operation")
-                .unwrap_or_else(|| "append".to_string());
-            let summary = rest_api::Summary {
-                operation,
-                additional_properties: summary_props,
-            };
-
             let snapshot = rest_api::Snapshot {
                 snapshot_id: new_snapshot_id,
                 parent_snapshot_id: commit.expected_snapshot_id,
                 sequence_number: 1, // Would need to track this properly
                 timestamp_ms,
                 manifest_list: manifest_list_path,
-                summary,
+                summary: rest_api::Summary::from_properties(commit.summary.clone()),
                 schema_id: Some(0),
             };
 

@@ -692,7 +692,7 @@ Iceberg table size: Depends on data volume and retention
 
 ```bash
 # Update image
-kubectl set image deployment/k2i k2i=ghcr.io/osodevops/k2i:v0.2.0 -n k2i
+kubectl set image deployment/k2i k2i=ghcr.io/osodevops/k2i:v0.2.1 -n k2i
 
 # Monitor rollout
 kubectl rollout status deployment/k2i -n k2i
