@@ -66,6 +66,7 @@ jobs:
     name: Unit Tests
     runs-on: ubuntu-latest
     needs: check
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -86,7 +87,9 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-unit-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
+            ${{ runner.os }}-cargo-check-${{ hashFiles('**/Cargo.lock') }}
             ${{ runner.os }}-cargo-unit-
+            ${{ runner.os }}-cargo-check-
 
       - name: Run unit tests (lib)
         run: cargo test --lib --all-features
@@ -124,7 +127,11 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
+            ${{ runner.os }}-cargo-unit-${{ hashFiles('**/Cargo.lock') }}
+            ${{ runner.os }}-cargo-check-${{ hashFiles('**/Cargo.lock') }}
             ${{ runner.os }}-cargo-integration-
+            ${{ runner.os }}-cargo-unit-
+            ${{ runner.os }}-cargo-check-
 
       - name: Run integration tests
         run: cargo test --test '*' --all-features -- --nocapture

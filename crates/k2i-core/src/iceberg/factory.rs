@@ -924,7 +924,7 @@ impl CatalogOperations for RestCatalogClient {
                 sequence_number: 1, // Would need to track this properly
                 timestamp_ms,
                 manifest_list: manifest_list_path,
-                summary: commit.summary.clone(),
+                summary: rest_api::Summary::from_properties(commit.summary.clone()),
                 schema_id: Some(0),
             };
 

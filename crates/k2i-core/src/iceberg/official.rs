@@ -98,7 +98,7 @@ pub async fn commit_append_with_catalog(
     namespace: &str,
     table: &str,
     files: Vec<DataFileInfo>,
-    summary: HashMap<String, String>,
+    mut summary: HashMap<String, String>,
 ) -> Result<OfficialCommitResult> {
     use ::iceberg::transaction::{ApplyTransactionAction, Transaction};
     if files.is_empty() {
@@ -106,6 +106,16 @@ pub async fn commit_append_with_catalog(
             "cannot append an empty file set".into(),
         )));
     }
+
+    // Remove "operation" from the summary HashMap before passing to the
+    // official iceberg-rust crate.  The crate's Summary struct has `operation`
+    // as a named field plus `#[serde(flatten)] additional_properties`.  If
+    // "operation" is left in the HashMap, it gets serialized twice (once from
+    // the struct field, once from the flattened map), causing "duplicate field
+    // `operation`" errors in catalogs like Lakekeeper.
+    //
+    // See: https://github.com/apache/iceberg/issues/9837
+    summary.remove("operation");
 
     let ident = table_ident(namespace, table)?;
     let loaded = catalog
@@ -477,5 +487,24 @@ mod tests {
         assert!(result.snapshot_id != 0);
         assert!(result.manifest_list_path.contains("/metadata/snap-"));
         assert!(result.manifest_list_path.ends_with(".avro"));
+
+        let table = catalog
+            .load_table(&table_ident("f1", "derived_state").unwrap())
+            .await
+            .expect("committed table metadata should reload after snapshot serialization");
+        let summary = table
+            .metadata()
+            .current_snapshot()
+            .expect("committed table should have a current snapshot")
+            .summary();
+        assert!(
+            !summary.additional_properties.contains_key("operation"),
+            "`operation` must not be forwarded as a flattened snapshot property"
+        );
+
+        let json = serde_json::to_string(summary).unwrap();
+        let round_tripped: ::iceberg::spec::Summary =
+            serde_json::from_str(&json).expect("snapshot summary should round-trip as JSON");
+        assert_eq!(round_tripped.operation, ::iceberg::spec::Operation::Append);
     }
 }
