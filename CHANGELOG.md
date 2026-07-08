@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Published the `ghcr.io/osodevops/k2i` Docker image as a multi-platform manifest list for `linux/amd64` and `linux/arm64`, built natively per architecture (no QEMU emulation) and verified by CI.
+
 ## [0.2.1] - 2026-07-07
 
 ### Fixed
