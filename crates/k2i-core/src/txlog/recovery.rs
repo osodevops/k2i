@@ -224,7 +224,7 @@ impl RecoveryState {
         }
 
         // Find incomplete flushes and orphan files
-        for (batch_id, _) in flush_started.iter() {
+        for batch_id in flush_started.keys() {
             if !flush_completed.contains_key(batch_id) {
                 state.incomplete_flushes.push(batch_id.clone());
 
