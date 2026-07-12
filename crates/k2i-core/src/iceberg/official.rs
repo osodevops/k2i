@@ -68,8 +68,13 @@ pub struct OfficialRestCommitter {
     warehouse_name: String,
     http_client: HttpClient,
     /// Cached warehouse prefix, resolved exactly once from `/v1/config`.
-    /// `None` means the catalog returned no prefix (single-warehouse catalog).
-    prefix_cache: OnceLock<Result<Option<String>>>,
+    ///
+    /// The outer `Option` is the `OnceLock` slot (empty until the first
+    /// successful resolution); the inner `Option<String>` is `None` when the
+    /// catalog returns no prefix (single-warehouse catalog). Failed
+    /// resolutions are intentionally *not* stored, so a transient error never
+    /// poisons the cache and later calls retry.
+    prefix_cache: OnceLock<Option<String>>,
     credential_type: CredentialType,
     bearer_token: Option<String>,
     oauth2_client_id: Option<String>,
@@ -254,12 +259,9 @@ impl OfficialRestCommitter {
     /// Uses the OnceLock — on the very first call it fetches from the server.
     /// Subsequent calls return the cached value.
     async fn do_resolve_prefix(&self) -> Result<Option<String>> {
-        // If the cache already has a real value, return it.
+        // If the cache already holds a successfully-resolved value, return it.
         if let Some(cached) = self.prefix_cache.get() {
-            return cached
-                .as_ref()
-                .map_err(|e| Error::Iceberg(IcebergError::Other(e.to_string())))
-                .cloned();
+            return Ok(cached.clone());
         }
 
         // First call: fetch from /v1/config
@@ -304,33 +306,19 @@ impl OfficialRestCommitter {
             )))
         })?;
 
-        let prefix = config
-            .overrides
-            .get("prefix")
-            .or_else(|| config.defaults.get("prefix"))
-            .cloned();
+        let prefix = extract_prefix(&config);
 
         // Cache the result — OnceLock::set returns Err if already set, which
-        // is fine because we just checked `get()` above.
-        let _ = self.prefix_cache.set(Ok(prefix.clone()));
+        // is benign because we just checked `get()` above (a concurrent first
+        // call may have won the race; its value is identical).
+        let _ = self.prefix_cache.set(prefix.clone());
 
         Ok(prefix)
     }
 
     /// Build the request URL for the standalone update_schema call.
     fn update_schema_url(&self, prefix: Option<&str>, namespace: &str, table: &str) -> String {
-        let encoded_ns = urlencoding::encode(namespace);
-        let encoded_table = urlencoding::encode(table);
-        match prefix {
-            Some(p) => format!(
-                "{}/v1/{}/namespaces/{}/tables/{}",
-                self.rest_uri, p, encoded_ns, encoded_table
-            ),
-            None => format!(
-                "{}/v1/namespaces/{}/tables/{}",
-                self.rest_uri, encoded_ns, encoded_table
-            ),
-        }
+        build_update_schema_url(&self.rest_uri, prefix, namespace, table)
     }
 
     /// Standalone `update_schema` implementation.
@@ -665,6 +653,21 @@ impl CatalogOperations for OfficialRestCommitter {
         table: &str,
         commit: SnapshotCommit,
     ) -> Result<SnapshotCommitResult> {
+        // NOTE: `commit.expected_snapshot_id` is intentionally not used here.
+        // Optimistic concurrency (CAS) is enforced by the official
+        // `Transaction` inside `commit_append_with_catalog`, which loads the
+        // current table metadata and lets the REST catalog validate the commit
+        // requirements. The caller-supplied `expected_snapshot_id` (derived
+        // from the metadata cache) would only duplicate that check.
+        //
+        // K2I ingestion is append-only, so `files_to_remove` is always empty;
+        // this path performs a `fast_append` and does not support removals. We
+        // assert the invariant rather than silently dropping removals.
+        debug_assert!(
+            commit.files_to_remove.is_empty(),
+            "OfficialRestCommitter.commit_snapshot only supports appends; \
+             files_to_remove must be empty"
+        );
         let files_added = commit.files_to_add.len();
         let files_removed = commit.files_to_remove.len();
 
@@ -709,6 +712,42 @@ impl CatalogOperations for OfficialRestCommitter {
         *self.oauth2_token.write() = None;
         info!("Official REST committer closed");
         Ok(())
+    }
+}
+
+/// Extract the warehouse prefix from a catalog `/v1/config` response.
+///
+/// Per the Iceberg REST spec, `overrides` take precedence over `defaults`.
+/// Returns `None` for single-warehouse catalogs that omit `prefix`.
+fn extract_prefix(config: &rest_api::CatalogConfig) -> Option<String> {
+    config
+        .overrides
+        .get("prefix")
+        .or_else(|| config.defaults.get("prefix"))
+        .cloned()
+}
+
+/// Build the REST URL for a table commit (used by the standalone
+/// `update_schema` path). When the catalog negotiated a warehouse `prefix`,
+/// it is inserted between `/v1/` and `namespaces/` so multi-warehouse
+/// catalogs (Lakekeeper, Polaris, Unity, Gravitino) address the right tenant.
+fn build_update_schema_url(
+    rest_uri: &str,
+    prefix: Option<&str>,
+    namespace: &str,
+    table: &str,
+) -> String {
+    let encoded_ns = urlencoding::encode(namespace);
+    let encoded_table = urlencoding::encode(table);
+    match prefix {
+        Some(p) => format!(
+            "{}/v1/{}/namespaces/{}/tables/{}",
+            rest_uri, p, encoded_ns, encoded_table
+        ),
+        None => format!(
+            "{}/v1/namespaces/{}/tables/{}",
+            rest_uri, encoded_ns, encoded_table
+        ),
     }
 }
 
@@ -1201,5 +1240,74 @@ mod tests {
         assert_eq!(back.fields.len(), original.fields.len());
         assert_eq!(back.fields[0].name, original.fields[0].name);
         assert_eq!(back.fields[0].field_type, original.fields[0].field_type);
+    }
+
+    fn catalog_config(
+        defaults: &[(&str, &str)],
+        overrides: &[(&str, &str)],
+    ) -> rest_api::CatalogConfig {
+        rest_api::CatalogConfig {
+            defaults: defaults
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            overrides: overrides
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn test_extract_prefix_from_overrides() {
+        let config = catalog_config(&[], &[("prefix", "ws-a")]);
+        assert_eq!(extract_prefix(&config), Some("ws-a".to_string()));
+    }
+
+    #[test]
+    fn test_extract_prefix_from_defaults() {
+        let config = catalog_config(&[("prefix", "ws-default")], &[]);
+        assert_eq!(extract_prefix(&config), Some("ws-default".to_string()));
+    }
+
+    #[test]
+    fn test_extract_prefix_overrides_win_over_defaults() {
+        let config = catalog_config(&[("prefix", "ws-default")], &[("prefix", "ws-override")]);
+        assert_eq!(extract_prefix(&config), Some("ws-override".to_string()));
+    }
+
+    #[test]
+    fn test_extract_prefix_absent_is_none() {
+        let config = catalog_config(&[], &[]);
+        assert_eq!(extract_prefix(&config), None);
+    }
+
+    #[test]
+    fn test_build_update_schema_url_with_prefix() {
+        let url = build_update_schema_url("http://catalog:8181", Some("ws-a"), "analytics", "events");
+        assert_eq!(
+            url,
+            "http://catalog:8181/v1/ws-a/namespaces/analytics/tables/events"
+        );
+    }
+
+    #[test]
+    fn test_build_update_schema_url_without_prefix() {
+        let url = build_update_schema_url("http://catalog:8181", None, "analytics", "events");
+        assert_eq!(
+            url,
+            "http://catalog:8181/v1/namespaces/analytics/tables/events"
+        );
+    }
+
+    #[test]
+    fn test_build_update_schema_url_encodes_namespace_and_table() {
+        // The prefix is inserted verbatim (already URL-safe as returned by the
+        // catalog); only the namespace and table components are encoded.
+        let url = build_update_schema_url("http://catalog:8181", Some("ws-a"), "my ns", "my table");
+        assert_eq!(
+            url,
+            "http://catalog:8181/v1/ws-a/namespaces/my%20ns/tables/my%20table"
+        );
     }
 }
