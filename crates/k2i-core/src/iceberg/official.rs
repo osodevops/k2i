@@ -5,17 +5,40 @@
 //! `CatalogOperations` implementations remain useful for lifecycle and health
 //! checks, but append commits that need DuckDB `iceberg_scan` compatibility
 //! should go through this path.
+//!
+//! ## Adapter over the official REST catalog client
+//!
+//! [`OfficialRestCommitter`] now also implements [`CatalogOperations`] by
+//! delegating most methods to the underlying `iceberg_catalog_rest::RestCatalog`.
+//! The one exception is `update_schema` — the official client's
+//! `Transaction::update_schema()` is merged to `apache/iceberg-rust` `main`
+//! but **not yet published to crates.io** (latest: `iceberg` `0.9.1`).
+//!
+//! Until `0.10.0` is published, `update_schema` is handled by a small,
+//! standalone, hand-rolled REST codepath in the same file.  It is explicitly
+//! **temporary scaffolding** tracked for removal by the follow-up feature
+//! `003-iceberg-010-readiness-spike`.
 
 use crate::config::{CatalogType, CredentialType, IcebergConfig};
-use crate::iceberg::factory::{DataFileInfo, SchemaFieldInfo, TableSchema};
+use crate::iceberg::factory::{
+    CatalogHealth, CatalogOperations, DataFileInfo, SchemaFieldInfo, SnapshotCommit,
+    SnapshotCommitResult, TableInfo, TableSchema,
+};
+use crate::iceberg::rest_api;
 use crate::{Error, IcebergError, Result};
-use ::iceberg::CatalogBuilder;
+use ::iceberg::{Catalog, CatalogBuilder};
+use async_trait::async_trait;
 use iceberg_catalog_rest::{
     RestCatalog, RestCatalogBuilder, REST_CATALOG_PROP_URI, REST_CATALOG_PROP_WAREHOUSE,
 };
+use parking_lot::RwLock;
+use reqwest::Client as HttpClient;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+use tracing::{debug, info};
 
 /// Result of a real Iceberg append commit.
 #[derive(Debug, Clone)]
@@ -26,10 +49,35 @@ pub struct OfficialCommitResult {
     pub manifest_list_path: String,
 }
 
+/// OAuth2 token cached in memory for the standalone `update_schema` path.
+#[derive(Debug, Clone)]
+struct CachedOAuthToken {
+    token: String,
+    expires_at: Instant,
+}
+
 /// REST-catalog backed official Iceberg committer.
+///
+/// Most [`CatalogOperations`] methods delegate to the underlying `RestCatalog`.
+/// `update_schema` is handled by a standalone REST codepath (see module docs).
 pub struct OfficialRestCommitter {
     catalog: RestCatalog,
     warehouse_path: String,
+    // ---- fields for the standalone update_schema path ----
+    rest_uri: String,
+    warehouse_name: String,
+    http_client: HttpClient,
+    /// Cached warehouse prefix, resolved exactly once from `/v1/config`.
+    /// `None` means the catalog returned no prefix (single-warehouse catalog).
+    prefix_cache: OnceLock<Result<Option<String>>>,
+    credential_type: CredentialType,
+    bearer_token: Option<String>,
+    oauth2_client_id: Option<String>,
+    oauth2_client_secret: Option<String>,
+    oauth2_scope: Option<String>,
+    oauth2_token_endpoint: Option<String>,
+    /// Cached OAuth2 access token for the standalone path.
+    oauth2_token: RwLock<Option<CachedOAuthToken>>,
 }
 
 impl OfficialRestCommitter {
@@ -45,12 +93,11 @@ impl OfficialRestCommitter {
             .as_ref()
             .ok_or_else(|| Error::Config("official REST committer requires rest_uri".into()))?;
 
+        let wh = warehouse_uri(&config.warehouse_path)?;
+
         let mut props = HashMap::from([
             (REST_CATALOG_PROP_URI.to_string(), rest_uri.clone()),
-            (
-                REST_CATALOG_PROP_WAREHOUSE.to_string(),
-                warehouse_uri(&config.warehouse_path)?,
-            ),
+            (REST_CATALOG_PROP_WAREHOUSE.to_string(), wh.clone()),
         ]);
 
         apply_rest_auth_props(config, &mut props)?;
@@ -65,9 +112,28 @@ impl OfficialRestCommitter {
             .await
             .map_err(map_iceberg_error)?;
 
+        // Build an HTTP client for the standalone update_schema path.
+        let timeout_secs = config.rest.request_timeout_seconds.unwrap_or(30);
+        let http_client = HttpClient::builder()
+            .timeout(Duration::from_secs(timeout_secs))
+            .pool_max_idle_per_host(config.catalog_manager.connection_pool_size)
+            .build()
+            .map_err(|e| Error::Config(format!("Failed to create HTTP client: {}", e)))?;
+
         Ok(Self {
             catalog,
             warehouse_path: config.warehouse_path.clone(),
+            rest_uri: rest_uri.trim_end_matches('/').to_string(),
+            warehouse_name: wh,
+            http_client,
+            prefix_cache: OnceLock::new(),
+            credential_type: config.rest.credential_type.clone(),
+            bearer_token: config.rest.credential.clone(),
+            oauth2_client_id: config.rest.oauth2_client_id.clone(),
+            oauth2_client_secret: config.rest.oauth2_client_secret.clone(),
+            oauth2_scope: config.rest.oauth2_scope.clone(),
+            oauth2_token_endpoint: config.rest.oauth2_token_endpoint.clone(),
+            oauth2_token: RwLock::new(None),
         })
     }
 
@@ -88,6 +154,612 @@ impl OfficialRestCommitter {
             summary,
         )
         .await
+    }
+
+    // ---- Standalone update_schema helpers ----
+
+    /// Return the auth header value for standalone REST calls.
+    async fn get_auth_header(&self) -> Result<Option<String>> {
+        match self.credential_type {
+            CredentialType::None => Ok(None),
+            CredentialType::Bearer => {
+                Ok(self.bearer_token.as_ref().map(|t| format!("Bearer {}", t)))
+            }
+            CredentialType::OAuth2 => {
+                // Check cached token
+                let needs_refresh = {
+                    let token = self.oauth2_token.read();
+                    match token.as_ref() {
+                        Some(cached) => Instant::now() >= cached.expires_at,
+                        None => true,
+                    }
+                };
+
+                if needs_refresh {
+                    self.refresh_oauth2_token().await?;
+                }
+
+                let token = self.oauth2_token.read();
+                Ok(token.as_ref().map(|t| format!("Bearer {}", t.token)))
+            }
+        }
+    }
+
+    /// Refresh OAuth2 token via the token endpoint.
+    async fn refresh_oauth2_token(&self) -> Result<()> {
+        let client_id = self
+            .oauth2_client_id
+            .as_ref()
+            .ok_or_else(|| Error::Config("OAuth2 requires client_id for standalone path".into()))?;
+        let client_secret = self.oauth2_client_secret.as_ref().ok_or_else(|| {
+            Error::Config("OAuth2 requires client_secret for standalone path".into())
+        })?;
+
+        let url = format!(
+            "{}/v1/oauth/tokens",
+            self.oauth2_token_endpoint
+                .as_deref()
+                .unwrap_or(&self.rest_uri)
+        );
+        let response = self
+            .http_client
+            .post(&url)
+            .form(&[
+                ("grant_type", "client_credentials"),
+                ("client_id", client_id),
+                ("client_secret", client_secret),
+                ("scope", self.oauth2_scope.as_deref().unwrap_or("")),
+            ])
+            .send()
+            .await
+            .map_err(|e| {
+                Error::Iceberg(IcebergError::CatalogConnection(format!(
+                    "OAuth2 token request failed: {}",
+                    e
+                )))
+            })?;
+
+        if !response.status().is_success() {
+            return Err(Error::Iceberg(IcebergError::CatalogConnection(format!(
+                "OAuth2 token request failed: {}",
+                response.status()
+            ))));
+        }
+
+        let token_response: rest_api::OAuthTokenResponse = response
+            .json()
+            .await
+            .map_err(|e| Error::Iceberg(IcebergError::CatalogConnection(e.to_string())))?;
+
+        let expires_in = token_response.expires_in.unwrap_or(3600);
+        let expires_at =
+            Instant::now() + Duration::from_secs((expires_in.saturating_sub(60)) as u64);
+
+        *self.oauth2_token.write() = Some(CachedOAuthToken {
+            token: token_response.access_token,
+            expires_at,
+        });
+
+        debug!(
+            "OAuth2 token refreshed for standalone path, expires in {}s",
+            expires_in
+        );
+        Ok(())
+    }
+
+    /// Resolve the warehouse prefix from `/v1/config` on first call.
+    /// Subsequent calls return the cached value.
+    ///
+    /// Returns `Ok(None)` when the catalog omits `prefix` (single-warehouse).
+    /// Uses the OnceLock — on the very first call it fetches from the server.
+    /// Subsequent calls return the cached value.
+    async fn do_resolve_prefix(&self) -> Result<Option<String>> {
+        // If the cache already has a real value, return it.
+        if let Some(cached) = self.prefix_cache.get() {
+            return cached
+                .as_ref()
+                .map_err(|e| Error::Iceberg(IcebergError::Other(e.to_string())))
+                .cloned();
+        }
+
+        // First call: fetch from /v1/config
+        let url = format!("{}/v1/config", self.rest_uri);
+        let mut req = self.http_client.get(&url);
+
+        if !self.warehouse_name.is_empty() {
+            req = req.query(&[("warehouse", &self.warehouse_name)]);
+        }
+
+        if let Some(auth) = self.get_auth_header().await? {
+            req = req.header("Authorization", auth);
+        }
+
+        let response = req
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .map_err(|e| {
+                Error::Iceberg(IcebergError::CatalogConnection(format!(
+                    "Failed to fetch /v1/config: {}",
+                    e
+                )))
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            let err = Error::Iceberg(IcebergError::CatalogConnection(format!(
+                "/v1/config returned {}: {}",
+                status, body
+            )));
+            // On first call, fail loudly — never cache the error since we
+            // want subsequent calls to also fail.
+            return Err(err);
+        }
+
+        let config: rest_api::CatalogConfig = response.json().await.map_err(|e| {
+            Error::Iceberg(IcebergError::CatalogConnection(format!(
+                "Failed to parse /v1/config response: {}",
+                e
+            )))
+        })?;
+
+        let prefix = config
+            .overrides
+            .get("prefix")
+            .or_else(|| config.defaults.get("prefix"))
+            .cloned();
+
+        // Cache the result — OnceLock::set returns Err if already set, which
+        // is fine because we just checked `get()` above.
+        let _ = self.prefix_cache.set(Ok(prefix.clone()));
+
+        Ok(prefix)
+    }
+
+    /// Build the request URL for the standalone update_schema call.
+    fn update_schema_url(&self, prefix: Option<&str>, namespace: &str, table: &str) -> String {
+        let encoded_ns = urlencoding::encode(namespace);
+        let encoded_table = urlencoding::encode(table);
+        match prefix {
+            Some(p) => format!(
+                "{}/v1/{}/namespaces/{}/tables/{}",
+                self.rest_uri, p, encoded_ns, encoded_table
+            ),
+            None => format!(
+                "{}/v1/namespaces/{}/tables/{}",
+                self.rest_uri, encoded_ns, encoded_table
+            ),
+        }
+    }
+
+    /// Standalone `update_schema` implementation.
+    ///
+    /// This is a temporary, narrowly-scoped hand-rolled REST codepath that
+    /// exists only because the official `iceberg-rust` client's
+    /// `Transaction::update_schema()` is not yet available on crates.io
+    /// (see module-level docs).
+    ///
+    /// TODO(iceberg-0.10): Delete this entire implementation once
+    /// `iceberg-rust` 0.10.0+ is published to crates.io with a stable
+    /// `Transaction::update_schema()` API.
+    ///
+    /// **Bug fixes vs. the deleted `RestCatalogClient`:**
+    /// - Prefix is resolved **exactly once** and cached (no per-call re-resolution).
+    /// - A transient error after the first successful resolution **never**
+    ///   overwrites the cached prefix.
+    /// - If the *first* resolution attempt fails, the method returns an error
+    ///   (no silent fallback to unprefixed paths).
+    async fn update_schema_standalone(
+        &self,
+        namespace: &str,
+        table: &str,
+        schema: &TableSchema,
+        expected_schema_id: Option<i32>,
+    ) -> Result<TableInfo> {
+        // Resolve prefix (cached after first call).
+        let prefix = self.do_resolve_prefix().await?;
+
+        let url = self.update_schema_url(prefix.as_deref(), namespace, table);
+
+        let mut requirements = Vec::new();
+        if let Some(current_schema_id) = expected_schema_id {
+            requirements
+                .push(rest_api::TableRequirement::AssertCurrentSchemaId { current_schema_id });
+        }
+
+        let last_column_id = schema.fields.iter().map(|field| field.id).max();
+        let updates = vec![
+            rest_api::TableUpdate::AddSchema {
+                schema: self.to_api_schema(schema),
+                last_column_id,
+            },
+            rest_api::TableUpdate::SetCurrentSchema {
+                schema_id: schema.schema_id,
+            },
+        ];
+
+        let request_body = rest_api::CommitTableRequest {
+            identifier: None,
+            requirements,
+            updates,
+        };
+
+        let mut req = self.http_client.post(&url).json(&request_body);
+        req = req.header("Content-Type", "application/json");
+        req = req.header("Accept", "application/json");
+
+        if let Some(auth) = self.get_auth_header().await? {
+            req = req.header("Authorization", auth);
+        }
+
+        let response = req.send().await.map_err(|e| {
+            Error::Iceberg(IcebergError::CatalogConnection(format!(
+                "update_schema request failed: {}",
+                e
+            )))
+        })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+
+            if status == reqwest::StatusCode::CONFLICT {
+                return Err(Error::Iceberg(IcebergError::SchemaEvolution(format!(
+                    "schema update conflict for {}.{} while moving to schema ID {}",
+                    namespace, table, schema.schema_id
+                ))));
+            }
+
+            return Err(self.handle_error_response(status, &body));
+        }
+
+        let commit_response: rest_api::CommitTableResponse =
+            response.json().await.map_err(|e| {
+                Error::Iceberg(IcebergError::Other(format!(
+                    "Failed to parse commit response: {}",
+                    e
+                )))
+            })?;
+
+        let committed_schema = self.convert_current_schema(&commit_response.metadata)?;
+
+        info!(
+            namespace = %namespace,
+            table = %table,
+            schema_id = schema.schema_id,
+            field_count = schema.fields.len(),
+            "Schema update committed via standalone REST path"
+        );
+
+        Ok(TableInfo {
+            namespace: namespace.to_string(),
+            name: table.to_string(),
+            location: commit_response.metadata.location,
+            current_snapshot_id: commit_response.metadata.current_snapshot_id,
+            schema: committed_schema,
+            properties: commit_response.metadata.properties,
+        })
+    }
+
+    /// Convert a K2I `TableSchema` to a `rest_api::Schema`.
+    fn to_api_schema(&self, schema: &TableSchema) -> rest_api::Schema {
+        rest_api::Schema {
+            schema_id: schema.schema_id,
+            r#type: "struct".to_string(),
+            fields: schema
+                .fields
+                .iter()
+                .map(|f| rest_api::SchemaField {
+                    id: f.id,
+                    name: f.name.clone(),
+                    field_type: schema_type_to_api_value(&f.field_type),
+                    required: f.required,
+                    doc: f.doc.clone(),
+                })
+                .collect(),
+            identifier_field_ids: vec![],
+        }
+    }
+
+    /// Convert a `rest_api::TableMetadata` to a `TableSchema`.
+    fn convert_current_schema(&self, metadata: &rest_api::TableMetadata) -> Result<TableSchema> {
+        let schema = metadata.current_schema().ok_or_else(|| {
+            Error::Iceberg(IcebergError::Other(format!(
+                "REST catalog table metadata at {} has no current schema",
+                metadata.location
+            )))
+        })?;
+        Ok(self.convert_schema(schema))
+    }
+
+    /// Convert a `rest_api::Schema` to a `TableSchema`.
+    fn convert_schema(&self, schema: &rest_api::Schema) -> TableSchema {
+        TableSchema {
+            schema_id: schema.schema_id,
+            fields: schema
+                .fields
+                .iter()
+                .map(|f| {
+                    let field_type = match &f.field_type {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    };
+                    SchemaFieldInfo {
+                        id: f.id,
+                        name: f.name.clone(),
+                        field_type,
+                        required: f.required,
+                        doc: f.doc.clone(),
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    /// Handle error response from REST API.
+    fn handle_error_response(&self, status: reqwest::StatusCode, body: &str) -> Error {
+        if let Ok(error_response) = serde_json::from_str::<rest_api::ErrorResponse>(body) {
+            match status {
+                reqwest::StatusCode::NOT_FOUND => {
+                    if error_response.error_type.contains("NoSuchTable") {
+                        Error::Iceberg(IcebergError::TableNotFound(error_response.message))
+                    } else if error_response.error_type.contains("NoSuchNamespace") {
+                        Error::Iceberg(IcebergError::CatalogConnection(format!(
+                            "Namespace not found: {}",
+                            error_response.message
+                        )))
+                    } else {
+                        Error::Iceberg(IcebergError::Other(error_response.message))
+                    }
+                }
+                reqwest::StatusCode::CONFLICT => Error::Iceberg(IcebergError::CasConflict {
+                    expected: -1,
+                    actual: -1,
+                }),
+                reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => {
+                    Error::Iceberg(IcebergError::CatalogConnection(format!(
+                        "Authentication failed: {}",
+                        error_response.message
+                    )))
+                }
+                _ => Error::Iceberg(IcebergError::Other(format!(
+                    "{}: {}",
+                    status, error_response.message
+                ))),
+            }
+        } else {
+            Error::Iceberg(IcebergError::Other(format!("{}: {}", status, body)))
+        }
+    }
+}
+
+#[async_trait]
+impl CatalogOperations for OfficialRestCommitter {
+    async fn health_check(&self) -> Result<CatalogHealth> {
+        let start = Instant::now();
+
+        // Use list_namespaces as a health probe — this implicitly validates
+        // prefix negotiation + auth in one round-trip.  The official client
+        // caches prefix resolution internally via OnceCell, so a subsequent
+        // health check never re-resolves /v1/config.
+        match self.catalog.list_namespaces(None).await {
+            Ok(_) => {
+                let elapsed = start.elapsed().as_millis() as u64;
+                Ok(CatalogHealth {
+                    is_healthy: true,
+                    response_time_ms: elapsed,
+                    message: Some(format!("REST catalog at {} is healthy", self.rest_uri)),
+                    catalog_type: CatalogType::Rest,
+                })
+            }
+            Err(e) => {
+                let elapsed = start.elapsed().as_millis() as u64;
+                Ok(CatalogHealth {
+                    is_healthy: false,
+                    response_time_ms: elapsed,
+                    message: Some(format!("Catalog health check failed: {}", e)),
+                    catalog_type: CatalogType::Rest,
+                })
+            }
+        }
+    }
+
+    async fn list_namespaces(&self) -> Result<Vec<String>> {
+        let namespaces = self
+            .catalog
+            .list_namespaces(None)
+            .await
+            .map_err(map_iceberg_error)?;
+        Ok(namespaces
+            .into_iter()
+            .map(|ns| ns.inner().join("."))
+            .collect())
+    }
+
+    async fn namespace_exists(&self, namespace: &str) -> Result<bool> {
+        let ident = namespace_ident(namespace)?;
+        self.catalog
+            .namespace_exists(&ident)
+            .await
+            .map_err(map_iceberg_error)
+    }
+
+    async fn create_namespace(&self, namespace: &str) -> Result<()> {
+        let ident = namespace_ident(namespace)?;
+        match self.catalog.create_namespace(&ident, HashMap::new()).await {
+            Ok(_) => {
+                info!(namespace = %namespace, "Created namespace");
+                Ok(())
+            }
+            Err(e) if e.kind() == ::iceberg::ErrorKind::NamespaceAlreadyExists => {
+                debug!(namespace = %namespace, "Namespace already exists");
+                Ok(())
+            }
+            Err(e) => Err(map_iceberg_error(e)),
+        }
+    }
+
+    async fn list_tables(&self, namespace: &str) -> Result<Vec<String>> {
+        let ident = namespace_ident(namespace)?;
+        let tables = self
+            .catalog
+            .list_tables(&ident)
+            .await
+            .map_err(map_iceberg_error)?;
+        Ok(tables.into_iter().map(|t| t.name).collect())
+    }
+
+    async fn table_exists(&self, namespace: &str, table: &str) -> Result<bool> {
+        let ident = table_ident(namespace, table)?;
+        self.catalog
+            .table_exists(&ident)
+            .await
+            .map_err(map_iceberg_error)
+    }
+
+    async fn load_table(&self, namespace: &str, table: &str) -> Result<TableInfo> {
+        let ident = table_ident(namespace, table)?;
+        let loaded = self
+            .catalog
+            .load_table(&ident)
+            .await
+            .map_err(map_iceberg_error)?;
+        Ok(table_info_from(namespace, table, &loaded))
+    }
+
+    async fn create_table(
+        &self,
+        namespace: &str,
+        table: &str,
+        schema: &TableSchema,
+    ) -> Result<TableInfo> {
+        let ns_ident = namespace_ident(namespace)?;
+        let iceberg_schema = table_schema_to_iceberg_schema(schema)?;
+        let table_creation = ::iceberg::TableCreation::builder()
+            .name(table.to_string())
+            .schema(iceberg_schema)
+            .build();
+        let created = self
+            .catalog
+            .create_table(&ns_ident, table_creation)
+            .await
+            .map_err(map_iceberg_error)?;
+        info!(namespace = %namespace, table = %table, "Created table");
+        Ok(table_info_from(namespace, table, &created))
+    }
+
+    async fn current_snapshot_id(&self, namespace: &str, table: &str) -> Result<Option<i64>> {
+        let ident = table_ident(namespace, table)?;
+        let loaded = self
+            .catalog
+            .load_table(&ident)
+            .await
+            .map_err(map_iceberg_error)?;
+        Ok(loaded.metadata().current_snapshot_id())
+    }
+
+    async fn commit_snapshot(
+        &self,
+        namespace: &str,
+        table: &str,
+        commit: SnapshotCommit,
+    ) -> Result<SnapshotCommitResult> {
+        let files_added = commit.files_to_add.len();
+        let files_removed = commit.files_to_remove.len();
+
+        let result = commit_append_with_catalog(
+            &self.catalog,
+            &self.warehouse_path,
+            namespace,
+            table,
+            commit.files_to_add,
+            commit.summary,
+        )
+        .await?;
+
+        Ok(SnapshotCommitResult {
+            snapshot_id: result.snapshot_id,
+            committed_at: chrono::Utc::now(),
+            files_added,
+            files_removed,
+        })
+    }
+
+    async fn update_schema(
+        &self,
+        namespace: &str,
+        table: &str,
+        schema: &TableSchema,
+        expected_schema_id: Option<i32>,
+    ) -> Result<TableInfo> {
+        self.update_schema_standalone(namespace, table, schema, expected_schema_id)
+            .await
+    }
+
+    fn catalog_type(&self) -> CatalogType {
+        CatalogType::Rest
+    }
+
+    fn warehouse_path(&self) -> &str {
+        &self.warehouse_path
+    }
+
+    async fn close(&self) -> Result<()> {
+        *self.oauth2_token.write() = None;
+        info!("Official REST committer closed");
+        Ok(())
+    }
+}
+
+/// Convert a K2I `field_type` string to a `serde_json::Value` suitable for
+/// the REST API schema representation.
+fn schema_type_to_api_value(field_type: &str) -> serde_json::Value {
+    let trimmed = field_type.trim();
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        serde_json::from_str(trimmed)
+            .unwrap_or_else(|_| serde_json::Value::String(field_type.to_string()))
+    } else {
+        serde_json::Value::String(field_type.to_string())
+    }
+}
+
+/// Convert a dot-separated namespace string to an Iceberg `NamespaceIdent`.
+fn namespace_ident(namespace: &str) -> Result<::iceberg::NamespaceIdent> {
+    let parts: Vec<&str> = namespace.split('.').filter(|p| !p.is_empty()).collect();
+    ::iceberg::NamespaceIdent::from_strs(parts).map_err(map_iceberg_error)
+}
+
+/// Convert an official Iceberg `Schema` back into K2I's `TableSchema`.
+fn iceberg_schema_to_table_schema(schema: &::iceberg::spec::Schema) -> TableSchema {
+    TableSchema {
+        schema_id: schema.schema_id(),
+        fields: schema
+            .as_struct()
+            .fields()
+            .iter()
+            .map(|field| SchemaFieldInfo {
+                id: field.id,
+                name: field.name.clone(),
+                field_type: field.field_type.to_string(),
+                required: field.required,
+                doc: field.doc.clone(),
+            })
+            .collect(),
+    }
+}
+
+/// Build a `TableInfo` from an official Iceberg `Table`.
+fn table_info_from(namespace: &str, table: &str, table_ref: &::iceberg::table::Table) -> TableInfo {
+    let metadata = table_ref.metadata();
+    let schema = iceberg_schema_to_table_schema(metadata.current_schema());
+    TableInfo {
+        namespace: namespace.to_string(),
+        name: table.to_string(),
+        location: metadata.location().to_string(),
+        current_snapshot_id: metadata.current_snapshot_id(),
+        schema,
+        properties: metadata.properties().clone(),
     }
 }
 
@@ -506,5 +1178,28 @@ mod tests {
         let round_tripped: ::iceberg::spec::Summary =
             serde_json::from_str(&json).expect("snapshot summary should round-trip as JSON");
         assert_eq!(round_tripped.operation, ::iceberg::spec::Operation::Append);
+    }
+
+    #[test]
+    fn test_namespace_ident() {
+        let ident = namespace_ident("db.schema").unwrap();
+        assert_eq!(ident.inner(), vec!["db", "schema"]);
+    }
+
+    #[test]
+    fn test_namespace_ident_single() {
+        let ident = namespace_ident("db").unwrap();
+        assert_eq!(ident.inner(), vec!["db"]);
+    }
+
+    #[test]
+    fn test_iceberg_schema_to_table_schema_roundtrip() {
+        let original = simple_schema();
+        let official = table_schema_to_iceberg_schema(&original).unwrap();
+        let back = iceberg_schema_to_table_schema(&official);
+        assert_eq!(back.schema_id, original.schema_id);
+        assert_eq!(back.fields.len(), original.fields.len());
+        assert_eq!(back.fields[0].name, original.fields[0].name);
+        assert_eq!(back.fields[0].field_type, original.fields[0].field_type);
     }
 }

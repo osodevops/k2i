@@ -18,9 +18,10 @@
 //! - Metadata caching via MetadataCache
 
 use crate::config::{IcebergConfig, ParquetCompression};
-use crate::iceberg::factory::{CatalogOperations, DataFileInfo, SnapshotCommit};
+use crate::iceberg::factory::{
+    CatalogOperations, DataFileInfo, SnapshotCommit, SnapshotCommitResult,
+};
 use crate::iceberg::metadata_cache::SharedMetadataCache;
-use crate::iceberg::official::{OfficialCommitResult, OfficialRestCommitter};
 use crate::iceberg::table_manager::TableManager;
 use crate::iceberg::transaction_coordinator::TransactionCoordinator;
 use crate::txlog::{TransactionEntry, TransactionLog};
@@ -101,11 +102,11 @@ struct CatalogCommitOutcome {
     manifest_list_path: Option<String>,
 }
 
-impl From<OfficialCommitResult> for CatalogCommitOutcome {
-    fn from(result: OfficialCommitResult) -> Self {
+impl From<SnapshotCommitResult> for CatalogCommitOutcome {
+    fn from(result: SnapshotCommitResult) -> Self {
         Self {
             snapshot_id: result.snapshot_id,
-            manifest_list_path: Some(result.manifest_list_path),
+            manifest_list_path: None,
         }
     }
 }
@@ -125,8 +126,6 @@ pub struct IcebergWriter {
     transaction_coordinator: Option<Arc<TransactionCoordinator>>,
     /// Optional metadata cache
     metadata_cache: Option<SharedMetadataCache>,
-    /// Optional official Iceberg metadata committer for REST catalogs.
-    official_committer: Option<OfficialRestCommitter>,
 }
 
 /// Builder for IcebergWriter.
@@ -188,12 +187,6 @@ impl IcebergWriterBuilder {
     /// Build the IcebergWriter.
     pub async fn build(self) -> Result<IcebergWriter> {
         let object_store = IcebergWriter::create_object_store(&self.config)?;
-        let official_committer = if OfficialRestCommitter::is_enabled(&self.config) {
-            Some(OfficialRestCommitter::new(&self.config).await?)
-        } else {
-            None
-        };
-
         Ok(IcebergWriter {
             config: self.config,
             object_store,
@@ -203,7 +196,6 @@ impl IcebergWriterBuilder {
             table_manager: self.table_manager,
             transaction_coordinator: self.transaction_coordinator,
             metadata_cache: self.metadata_cache,
-            official_committer,
         })
     }
 }
@@ -572,31 +564,6 @@ impl IcebergWriter {
     ) -> Result<CatalogCommitOutcome> {
         let namespace = &self.config.database_name;
         let table = &self.config.table_name;
-
-        if let Some(ref committer) = self.official_committer {
-            let data_file =
-                self.build_data_file_info(file_path, file_size_bytes, row_count, partition_info);
-            let summary = Self::build_commit_summary(row_count, kafka_offset);
-            let result = committer
-                .commit_append(namespace, table, vec![data_file], summary)
-                .await?;
-
-            if let Some(ref cache) = self.metadata_cache {
-                cache.set_snapshot_id(result.snapshot_id);
-            }
-
-            info!(
-                namespace = %namespace,
-                table = %table,
-                snapshot_id = result.snapshot_id,
-                manifest_list = %result.manifest_list_path,
-                file_path = %file_path,
-                kafka_offset = kafka_offset,
-                "Committed with official Iceberg metadata"
-            );
-
-            return Ok(result.into());
-        }
 
         // If we have catalog integration, use real catalog operations
         if let Some(ref catalog) = self.catalog {
