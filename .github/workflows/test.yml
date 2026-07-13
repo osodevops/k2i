@@ -161,13 +161,15 @@ jobs:
   tests-complete:
     name: Tests Complete
     runs-on: ubuntu-latest
-    needs: [check, unit-tests]
+    needs: [check, unit-tests, integration-tests, security-audit]
     if: always()
     steps:
       - name: Check all tests passed
         run: |
           if [ "${{ needs.check.result }}" != "success" ] || \
-             [ "${{ needs.unit-tests.result }}" != "success" ]; then
+             [ "${{ needs.unit-tests.result }}" != "success" ] || \
+             [ "${{ needs.integration-tests.result }}" != "success" ] || \
+             [ "${{ needs.security-audit.result }}" != "success" ]; then
             echo "One or more required jobs failed"
             exit 1
           fi
