@@ -37,6 +37,19 @@ pub struct CreateNamespaceRequest {
     pub properties: HashMap<String, String>,
 }
 
+/// Namespace response retained for compatibility with the public 0.2 API.
+///
+/// K2I's REST implementation now delegates namespace operations to the
+/// official Apache Iceberg client.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NamespaceResponse {
+    /// Namespace identifier
+    pub namespace: Vec<String>,
+    /// Namespace properties
+    #[serde(default)]
+    pub properties: HashMap<String, String>,
+}
+
 /// List tables response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListTablesResponse {
@@ -514,6 +527,58 @@ pub struct CommitTableResponse {
     pub metadata: TableMetadata,
 }
 
+/// Data file representation retained for compatibility with the public 0.2
+/// API. Official snapshot commits use `iceberg::spec::DataFile` internally.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataFile {
+    /// Content type (data, position-deletes, equality-deletes)
+    #[serde(default = "default_content_type")]
+    pub content: String,
+    /// File path
+    #[serde(rename = "file-path")]
+    pub file_path: String,
+    /// File format (parquet, avro, orc)
+    #[serde(rename = "file-format")]
+    pub file_format: String,
+    /// Partition data (JSON-encoded values)
+    #[serde(default)]
+    pub partition: HashMap<String, serde_json::Value>,
+    /// Record count
+    #[serde(rename = "record-count")]
+    pub record_count: i64,
+    /// File size in bytes
+    #[serde(rename = "file-size-in-bytes")]
+    pub file_size_in_bytes: i64,
+    /// Column sizes (field ID -> size)
+    #[serde(skip_serializing_if = "Option::is_none", rename = "column-sizes")]
+    pub column_sizes: Option<HashMap<i32, i64>>,
+    /// Value counts (field ID -> count)
+    #[serde(skip_serializing_if = "Option::is_none", rename = "value-counts")]
+    pub value_counts: Option<HashMap<i32, i64>>,
+    /// Null value counts (field ID -> count)
+    #[serde(skip_serializing_if = "Option::is_none", rename = "null-value-counts")]
+    pub null_value_counts: Option<HashMap<i32, i64>>,
+    /// NaN value counts (field ID -> count)
+    #[serde(skip_serializing_if = "Option::is_none", rename = "nan-value-counts")]
+    pub nan_value_counts: Option<HashMap<i32, i64>>,
+    /// Lower bounds (field ID -> encoded value)
+    #[serde(skip_serializing_if = "Option::is_none", rename = "lower-bounds")]
+    pub lower_bounds: Option<HashMap<i32, String>>,
+    /// Upper bounds (field ID -> encoded value)
+    #[serde(skip_serializing_if = "Option::is_none", rename = "upper-bounds")]
+    pub upper_bounds: Option<HashMap<i32, String>>,
+    /// Sort order ID
+    #[serde(skip_serializing_if = "Option::is_none", rename = "sort-order-id")]
+    pub sort_order_id: Option<i32>,
+    /// Split offsets
+    #[serde(skip_serializing_if = "Option::is_none", rename = "split-offsets")]
+    pub split_offsets: Option<Vec<i64>>,
+}
+
+fn default_content_type() -> String {
+    "data".to_string()
+}
+
 /// Error response from REST API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorResponse {
@@ -527,6 +592,22 @@ pub struct ErrorResponse {
     /// Stack trace (optional)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stack: Option<Vec<String>>,
+}
+
+/// OAuth token request retained for compatibility with the public 0.2 API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OAuthTokenRequest {
+    /// Grant type
+    pub grant_type: String,
+    /// Client ID
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// Client secret
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
+    /// Scope
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 /// OAuth token response.

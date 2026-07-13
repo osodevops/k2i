@@ -654,6 +654,7 @@ impl IcebergWriter {
             let commit_result = catalog.commit_snapshot(namespace, table, commit).await?;
             commit_result.snapshot_id
         };
+        let manifest_list_path = catalog.manifest_list_path_for_snapshot(result);
 
         // Update cache with new snapshot ID
         if let Some(ref cache) = self.metadata_cache {
@@ -671,7 +672,7 @@ impl IcebergWriter {
 
         Ok(CatalogCommitOutcome {
             snapshot_id: result,
-            manifest_list_path: None,
+            manifest_list_path,
         })
     }
 

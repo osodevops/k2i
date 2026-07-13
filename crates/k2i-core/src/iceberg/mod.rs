@@ -28,8 +28,8 @@ mod writer;
 pub use catalog::{CatalogManager, TableMetadata};
 pub use factory::{
     CatalogFactory, CatalogFactoryRegistry, CatalogHealth, CatalogOperations, DataFileInfo,
-    RestCatalogFactory, SchemaFieldInfo, SnapshotCommit, SnapshotCommitResult, TableInfo,
-    TableSchema,
+    RestCatalogClient, RestCatalogFactory, SchemaFieldInfo, SnapshotCommit, SnapshotCommitResult,
+    TableInfo, TableSchema,
 };
 pub use glue::{GlueCatalogClient, GlueCatalogFactory, GlueClientConfig};
 pub use hive::{HiveCatalogClient, HiveCatalogFactory, HiveClientConfig};

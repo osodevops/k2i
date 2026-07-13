@@ -86,6 +86,16 @@ pub trait CatalogOperations: Send + Sync {
         commit: SnapshotCommit,
     ) -> Result<SnapshotCommitResult>;
 
+    /// Return the real manifest-list path recorded for a committed snapshot,
+    /// when the catalog implementation exposes it.
+    ///
+    /// The default keeps existing catalog implementations source-compatible.
+    /// Callers must tolerate `None` because not every backend produces
+    /// official Iceberg metadata through this abstraction yet.
+    fn manifest_list_path_for_snapshot(&self, _snapshot_id: i64) -> Option<String> {
+        None
+    }
+
     /// Commit a new current table schema.
     ///
     /// Catalogs that do not implement Iceberg table-update commits return an
@@ -284,8 +294,108 @@ impl CatalogFactory for RestCatalogFactory {
     }
 }
 
-/// REST catalog client has been replaced by OfficialRestCommitter in official.rs.
-/// Keep only the factory-level test for the registry.
+/// Backward-compatible adapter for the former hand-written REST client.
+///
+/// New code should construct [`crate::iceberg::OfficialRestCommitter`]
+/// directly or use [`RestCatalogFactory`]. This adapter preserves the public
+/// constructor and trait implementation released in K2I 0.2.x while routing
+/// every operation through the official Apache Iceberg REST client.
+pub struct RestCatalogClient {
+    inner: super::official::OfficialRestCommitter,
+}
+
+impl RestCatalogClient {
+    /// Create a REST catalog client using the supplied endpoint.
+    pub async fn new(config: &IcebergConfig, rest_uri: String) -> Result<Self> {
+        let mut config = config.clone();
+        config.rest_uri = Some(rest_uri);
+        Ok(Self {
+            inner: super::official::OfficialRestCommitter::new(&config).await?,
+        })
+    }
+}
+
+#[async_trait]
+impl CatalogOperations for RestCatalogClient {
+    async fn health_check(&self) -> Result<CatalogHealth> {
+        self.inner.health_check().await
+    }
+
+    async fn list_namespaces(&self) -> Result<Vec<String>> {
+        self.inner.list_namespaces().await
+    }
+
+    async fn namespace_exists(&self, namespace: &str) -> Result<bool> {
+        self.inner.namespace_exists(namespace).await
+    }
+
+    async fn create_namespace(&self, namespace: &str) -> Result<()> {
+        self.inner.create_namespace(namespace).await
+    }
+
+    async fn list_tables(&self, namespace: &str) -> Result<Vec<String>> {
+        self.inner.list_tables(namespace).await
+    }
+
+    async fn table_exists(&self, namespace: &str, table: &str) -> Result<bool> {
+        self.inner.table_exists(namespace, table).await
+    }
+
+    async fn load_table(&self, namespace: &str, table: &str) -> Result<TableInfo> {
+        self.inner.load_table(namespace, table).await
+    }
+
+    async fn create_table(
+        &self,
+        namespace: &str,
+        table: &str,
+        schema: &TableSchema,
+    ) -> Result<TableInfo> {
+        self.inner.create_table(namespace, table, schema).await
+    }
+
+    async fn current_snapshot_id(&self, namespace: &str, table: &str) -> Result<Option<i64>> {
+        self.inner.current_snapshot_id(namespace, table).await
+    }
+
+    async fn commit_snapshot(
+        &self,
+        namespace: &str,
+        table: &str,
+        commit: SnapshotCommit,
+    ) -> Result<SnapshotCommitResult> {
+        self.inner.commit_snapshot(namespace, table, commit).await
+    }
+
+    fn manifest_list_path_for_snapshot(&self, snapshot_id: i64) -> Option<String> {
+        self.inner.manifest_list_path_for_snapshot(snapshot_id)
+    }
+
+    async fn update_schema(
+        &self,
+        namespace: &str,
+        table: &str,
+        schema: &TableSchema,
+        expected_schema_id: Option<i32>,
+    ) -> Result<TableInfo> {
+        self.inner
+            .update_schema(namespace, table, schema, expected_schema_id)
+            .await
+    }
+
+    fn catalog_type(&self) -> CatalogType {
+        self.inner.catalog_type()
+    }
+
+    fn warehouse_path(&self) -> &str {
+        self.inner.warehouse_path()
+    }
+
+    async fn close(&self) -> Result<()> {
+        self.inner.close().await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
