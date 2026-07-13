@@ -20,6 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserved complex Iceberg struct, list, and map types as canonical JSON so unchanged Protobuf schemas are not incorrectly classified as breaking changes.
 - Corrected explicit OAuth2 token endpoint handling and serialized concurrent route and token initialization.
 - Preserved the public K2I 0.2 REST adapter and protocol types for patch-release API compatibility.
+- Updated direct and transitive dependencies to clear 16 RustSec findings, including the current Prometheus, AWS-LC, `bytes`, `quinn-proto`, `rustls-webpki`, and `time` fixes.
+- Made the security audit blocking, with narrowly documented exceptions for advisories pinned by upstream dependencies or confined to unused and test-only code paths.
+
+### Requirements
+
+- Raised the documented minimum supported Rust version to 1.88, matching the existing Apache Iceberg and AWS SDK dependency graph.
 
 ### Verified
 

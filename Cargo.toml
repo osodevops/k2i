@@ -15,7 +15,7 @@ license = "Apache-2.0"
 authors = ["OSO DevOps"]
 repository = "https://github.com/osodevops/k2i"
 homepage = "https://github.com/osodevops/k2i"
-rust-version = "1.75"
+rust-version = "1.88"
 
 [workspace.dependencies]
 # Kafka
@@ -79,7 +79,7 @@ anyhow = "1"
 # Logging & metrics
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-prometheus = "0.13"
+prometheus = "0.14"
 
 # HTTP server (for metrics/health)
 axum = "0.7"
