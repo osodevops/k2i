@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-07-13
+
+### Changed
+
+- Unified REST catalog lifecycle and snapshot operations on the official Apache Iceberg client, retaining only a narrow schema-update fallback until the pinned client exposes that transaction API.
+- Made the schema-update fallback follow Iceberg REST runtime URI and warehouse-prefix negotiation, multipart namespace encoding, custom headers, and configured bearer or OAuth2 authentication.
+
+### Fixed
+
+- Preserved the real manifest-list path through catalog commits, enforced caller snapshot preconditions, and rejected unsupported file removals instead of silently omitting them.
+- Preserved complex Iceberg struct, list, and map types as canonical JSON so unchanged Protobuf schemas are not incorrectly classified as breaking changes.
+- Corrected explicit OAuth2 token endpoint handling and serialized concurrent route and token initialization.
+- Preserved the public K2I 0.2 REST adapter and protocol types for patch-release API compatibility.
+
+### Verified
+
+- Full workspace formatting, Clippy, unit, integration, RPC, documentation, and semantic-version compatibility checks.
+- Docker Iceberg correctness flow with real REST metadata and DuckDB `iceberg_scan` validation.
+- 100,000-row Docker Iceberg load flow with full cold visibility across 20 data files and 20 snapshots.
+
 ## [0.2.1] - 2026-07-07
 
 ### Added
