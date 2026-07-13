@@ -610,7 +610,7 @@ impl HotBuffer {
         let records = self.records.read();
         records
             .iter()
-            .filter(|record| max_lsn.map_or(true, |lsn| record.read_lsn <= lsn))
+            .filter(|record| max_lsn.is_none_or(|lsn| record.read_lsn <= lsn))
             .cloned()
             .collect()
     }

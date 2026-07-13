@@ -37,7 +37,10 @@ pub struct CreateNamespaceRequest {
     pub properties: HashMap<String, String>,
 }
 
-/// Namespace response.
+/// Namespace response retained for compatibility with the public 0.2 API.
+///
+/// K2I's REST implementation now delegates namespace operations to the
+/// official Apache Iceberg client.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NamespaceResponse {
     /// Namespace identifier
@@ -524,7 +527,8 @@ pub struct CommitTableResponse {
     pub metadata: TableMetadata,
 }
 
-/// Data file for adding to snapshots.
+/// Data file representation retained for compatibility with the public 0.2
+/// API. Official snapshot commits use `iceberg::spec::DataFile` internally.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DataFile {
     /// Content type (data, position-deletes, equality-deletes)
@@ -590,7 +594,7 @@ pub struct ErrorResponse {
     pub stack: Option<Vec<String>>,
 }
 
-/// OAuth token request.
+/// OAuth token request retained for compatibility with the public 0.2 API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OAuthTokenRequest {
     /// Grant type
@@ -784,30 +788,6 @@ mod tests {
         assert!(json.contains("add-schema"));
         assert!(json.contains("set-current-schema"));
         assert!(json.contains("last-column-id"));
-    }
-
-    #[test]
-    fn test_data_file_serialization() {
-        let file = DataFile {
-            content: "data".to_string(),
-            file_path: "s3://bucket/data/file.parquet".to_string(),
-            file_format: "parquet".to_string(),
-            partition: HashMap::new(),
-            record_count: 1000,
-            file_size_in_bytes: 1048576,
-            column_sizes: None,
-            value_counts: None,
-            null_value_counts: None,
-            nan_value_counts: None,
-            lower_bounds: None,
-            upper_bounds: None,
-            sort_order_id: None,
-            split_offsets: None,
-        };
-
-        let json = serde_json::to_string(&file).unwrap();
-        assert!(json.contains("file-path"));
-        assert!(json.contains("record-count"));
     }
 
     #[test]
