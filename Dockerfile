@@ -1,5 +1,5 @@
 # Build stage
-# Using rust:1-bookworm to get the latest stable Rust (1.85+ required for edition2024)
+# Using rust:1-bookworm to get the latest stable Rust (1.94+ required by iceberg 0.10)
 FROM rust:1-bookworm AS builder
 
 WORKDIR /build

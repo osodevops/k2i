@@ -15,22 +15,22 @@ license = "Apache-2.0"
 authors = ["OSO DevOps"]
 repository = "https://github.com/osodevops/k2i"
 homepage = "https://github.com/osodevops/k2i"
-rust-version = "1.88"
+rust-version = "1.94"
 
 [workspace.dependencies]
 # Kafka
 rdkafka = { version = "0.38", features = ["cmake-build", "ssl"] }
 
 # Arrow ecosystem
-arrow = { version = "54", features = ["csv", "json", "prettyprint"] }
-arrow-ipc = "54"
-arrow-json = "54"
-arrow-select = "54"
-parquet = { version = "54", features = ["snap", "async"] }
+arrow = { version = "58", features = ["csv", "json", "prettyprint"] }
+arrow-ipc = "58"
+arrow-json = "58"
+arrow-select = "58"
+parquet = { version = "58", features = ["snap", "async"] }
 
 # Iceberg (official Apache implementation)
-iceberg = "0.7"
-iceberg-catalog-rest = "0.7"
+iceberg = "0.10"
+iceberg-catalog-rest = "0.10"
 
 # SQL
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "any", "sqlite", "postgres", "migrate"] }

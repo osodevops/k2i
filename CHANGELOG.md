@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Upgraded the official Apache Iceberg Rust client from 0.7 to 0.10.0 and the Arrow/Parquet ecosystem from 54 to 58.
+- Removed the temporary standalone REST `update_schema` fallback now that `Transaction::update_schema()` is available in `iceberg-rust` 0.10.0.
+- Simplified `OfficialRestCommitter` by delegating all catalog operations to the official `RestCatalog` transaction APIs.
+
+### Fixed
+
+- Avoided manual OAuth2, route resolution, and multipart namespace encoding logic previously needed for the schema-update fallback.
+- Aligned Parquet writer properties with the parquet 58 API (`set_max_row_group_row_count`).
+
+### Requirements
+
+- Raised the documented minimum supported Rust version to 1.94, matching `iceberg` 0.10.0 and the updated AWS SDK dependency graph.
+
 ## [0.2.2] - 2026-07-13
 
 ### Changed
