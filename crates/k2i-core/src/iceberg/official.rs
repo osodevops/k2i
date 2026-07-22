@@ -375,6 +375,95 @@ fn namespace_ident(namespace: &str) -> Result<::iceberg::NamespaceIdent> {
     ::iceberg::NamespaceIdent::from_strs(parts).map_err(map_iceberg_error)
 }
 
+/// Convert an Iceberg type to the JSON string format used by the protobuf decoder.
+///
+/// Primitive types become plain strings (e.g. `"double"`), while nested types
+/// produce full JSON objects so that round-tripping through `TableSchema` and
+/// `parse_iceberg_type` preserves the exact representation.
+fn iceberg_type_to_json_string(ty: &::iceberg::spec::Type) -> String {
+    use ::iceberg::spec::Type;
+    match ty {
+        Type::Primitive(p) => {
+            // Primitives use the same lowercase names as iceberg_type_value.
+            let s = match p {
+                ::iceberg::spec::PrimitiveType::Boolean => "boolean",
+                ::iceberg::spec::PrimitiveType::Int => "int",
+                ::iceberg::spec::PrimitiveType::Long => "long",
+                ::iceberg::spec::PrimitiveType::Float => "float",
+                ::iceberg::spec::PrimitiveType::Double => "double",
+                ::iceberg::spec::PrimitiveType::Date => "date",
+                ::iceberg::spec::PrimitiveType::Time => "time",
+                ::iceberg::spec::PrimitiveType::Timestamp => "timestamp",
+                ::iceberg::spec::PrimitiveType::Timestamptz => "timestamptz",
+                ::iceberg::spec::PrimitiveType::TimestampNs => "timestamp_ns",
+                ::iceberg::spec::PrimitiveType::TimestamptzNs => "timestamptz_ns",
+                ::iceberg::spec::PrimitiveType::String => "string",
+                ::iceberg::spec::PrimitiveType::Uuid => "uuid",
+                ::iceberg::spec::PrimitiveType::Fixed(_) => "binary",
+                ::iceberg::spec::PrimitiveType::Binary => "binary",
+                ::iceberg::spec::PrimitiveType::Decimal { precision, scale } => {
+return format!("decimal({},{})", precision, scale);
+                }
+            };
+            s.to_string()
+        }
+        Type::Struct(s) => {
+            let fields: Vec<serde_json::Value> = s
+                .fields()
+                .iter()
+                .map(|f| {
+serde_json::json!({
+"id": f.id,
+"name": f.name,
+"required": f.required,
+"type": serde_json::from_str::<serde_json::Value>(
+&iceberg_type_to_json_string(&f.field_type)
+)
+.unwrap_or_else(|_| serde_json::Value::String(
+iceberg_type_to_json_string(&f.field_type)
+)),
+"doc": f.doc,
+})
+                })
+                .collect();
+            serde_json::json!({
+                "type": "struct",
+                "fields": fields,
+            })
+            .to_string()
+        }
+        Type::List(l) => {
+            let element = iceberg_type_to_json_string(&l.element_field.field_type);
+            let element_value = serde_json::from_str::<serde_json::Value>(&element)
+                .unwrap_or(serde_json::Value::String(element));
+            serde_json::json!({
+                "type": "list",
+                "element-id": l.element_field.id,
+                "element": element_value,
+                "element-required": l.element_field.required,
+            })
+            .to_string()
+        }
+        Type::Map(m) => {
+            let key = iceberg_type_to_json_string(&m.key_field.field_type);
+            let value = iceberg_type_to_json_string(&m.value_field.field_type);
+            let key_value = serde_json::from_str::<serde_json::Value>(&key)
+                .unwrap_or(serde_json::Value::String(key));
+            let value_value = serde_json::from_str::<serde_json::Value>(&value)
+                .unwrap_or(serde_json::Value::String(value));
+            serde_json::json!({
+                "type": "map",
+                "key-id": m.key_field.id,
+                "key": key_value,
+                "value-id": m.value_field.id,
+                "value": value_value,
+                "value-required": m.value_field.required,
+            })
+            .to_string()
+        }
+    }
+}
+
 /// Convert an official Iceberg `Schema` back into K2I's `TableSchema`.
 fn iceberg_schema_to_table_schema(schema: &::iceberg::spec::Schema) -> TableSchema {
     TableSchema {
@@ -386,7 +475,7 @@ fn iceberg_schema_to_table_schema(schema: &::iceberg::spec::Schema) -> TableSche
             .map(|field| SchemaFieldInfo {
                 id: field.id,
                 name: field.name.clone(),
-                field_type: field.field_type.to_string(),
+                field_type: iceberg_type_to_json_string(&field.field_type),
                 required: field.required,
                 doc: field.doc.clone(),
             })
