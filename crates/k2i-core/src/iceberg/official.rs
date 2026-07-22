@@ -24,6 +24,7 @@ use async_trait::async_trait;
 use iceberg_catalog_rest::{
     RestCatalog, RestCatalogBuilder, REST_CATALOG_PROP_URI, REST_CATALOG_PROP_WAREHOUSE,
 };
+use iceberg_storage_opendal::OpenDalResolvingStorageFactory;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -80,6 +81,7 @@ impl OfficialRestCommitter {
         }
 
         let catalog = RestCatalogBuilder::default()
+            .with_storage_factory(Arc::new(OpenDalResolvingStorageFactory::new()))
             .load("k2i", props)
             .await
             .map_err(map_iceberg_error)?;

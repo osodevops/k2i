@@ -22,6 +22,7 @@ parquet.workspace = true
 # Iceberg
 iceberg.workspace = true
 iceberg-catalog-rest.workspace = true
+iceberg-storage-opendal.workspace = true
 
 # Object storage
 object_store.workspace = true

@@ -1,11 +1,11 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/k2i-core",
-    "crates/k2i-cli",
-    "crates/k2i-rpc",
-    "crates/k2i-rpc-server",
-    "crates/k2i-e2e-runner",
+  "crates/k2i-core",
+  "crates/k2i-cli",
+  "crates/k2i-rpc",
+  "crates/k2i-rpc-server",
+  "crates/k2i-e2e-runner",
 ]
 
 [workspace.package]
@@ -31,9 +31,20 @@ parquet = { version = "58", features = ["snap", "async"] }
 # Iceberg (official Apache implementation)
 iceberg = "0.10"
 iceberg-catalog-rest = "0.10"
+iceberg-storage-opendal = { version = "0.10", features = [
+  "opendal-fs",
+  "opendal-s3",
+] }
 
 # SQL
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "any", "sqlite", "postgres", "migrate"] }
+sqlx = { version = "0.8", default-features = false, features = [
+  "runtime-tokio",
+  "tls-rustls",
+  "any",
+  "sqlite",
+  "postgres",
+  "migrate",
+] }
 
 # Object storage
 object_store = { version = "0.11", features = ["aws", "azure", "gcp", "http"] }
@@ -89,7 +100,10 @@ tower = "0.5"
 chrono = { version = "0.4", features = ["serde"] }
 
 # HTTP client
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = [
+  "json",
+  "rustls-tls",
+] }
 
 # Utilities
 uuid = { version = "1", features = ["v4"] }
@@ -102,7 +116,10 @@ glob = "0.3"
 
 # Testing
 testcontainers = "0.23"
-testcontainers-modules = { version = "0.11", features = ["kafka", "localstack"] }
+testcontainers-modules = { version = "0.11", features = [
+  "kafka",
+  "localstack",
+] }
 tempfile = "3"
 tokio-test = "0.4"
 proptest = "1.5"
