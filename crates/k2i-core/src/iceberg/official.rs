@@ -402,7 +402,7 @@ fn iceberg_type_to_json_string(ty: &::iceberg::spec::Type) -> String {
                 ::iceberg::spec::PrimitiveType::Fixed(_) => "binary",
                 ::iceberg::spec::PrimitiveType::Binary => "binary",
                 ::iceberg::spec::PrimitiveType::Decimal { precision, scale } => {
-return format!("decimal({},{})", precision, scale);
+                    return format!("decimal({},{})", precision, scale);
                 }
             };
             s.to_string()
@@ -412,18 +412,18 @@ return format!("decimal({},{})", precision, scale);
                 .fields()
                 .iter()
                 .map(|f| {
-serde_json::json!({
-"id": f.id,
-"name": f.name,
-"required": f.required,
-"type": serde_json::from_str::<serde_json::Value>(
-&iceberg_type_to_json_string(&f.field_type)
-)
-.unwrap_or_else(|_| serde_json::Value::String(
-iceberg_type_to_json_string(&f.field_type)
-)),
-"doc": f.doc,
-})
+                    serde_json::json!({
+                    "id": f.id,
+                    "name": f.name,
+                    "required": f.required,
+                    "type": serde_json::from_str::<serde_json::Value>(
+                    &iceberg_type_to_json_string(&f.field_type)
+                    )
+                    .unwrap_or_else(|_| serde_json::Value::String(
+                    iceberg_type_to_json_string(&f.field_type)
+                    )),
+                    "doc": f.doc,
+                    })
                 })
                 .collect();
             serde_json::json!({
@@ -944,45 +944,39 @@ mod tests {
         use ::iceberg::spec::{PrimitiveType, Type};
 
         let cases = vec![
-(Type::Primitive(PrimitiveType::Boolean), "boolean"),
-(Type::Primitive(PrimitiveType::Int), "int"),
-(Type::Primitive(PrimitiveType::Long), "long"),
-(Type::Primitive(PrimitiveType::Float), "float"),
-(Type::Primitive(PrimitiveType::Double), "double"),
-(Type::Primitive(PrimitiveType::Date), "date"),
-(Type::Primitive(PrimitiveType::Time), "time"),
-(Type::Primitive(PrimitiveType::Timestamp), "timestamp"),
-(
-Type::Primitive(PrimitiveType::Timestamptz),
-"timestamptz",
-),
-(
-Type::Primitive(PrimitiveType::TimestampNs),
-"timestamp_ns",
-),
-(
-Type::Primitive(PrimitiveType::TimestamptzNs),
-"timestamptz_ns",
-),
-(Type::Primitive(PrimitiveType::String), "string"),
-(Type::Primitive(PrimitiveType::Uuid), "uuid"),
-(Type::Primitive(PrimitiveType::Binary), "binary"),
-(
-Type::Primitive(PrimitiveType::Decimal {
-precision: 10,
-scale: 2,
-}),
-"decimal(10,2)",
-),
+            (Type::Primitive(PrimitiveType::Boolean), "boolean"),
+            (Type::Primitive(PrimitiveType::Int), "int"),
+            (Type::Primitive(PrimitiveType::Long), "long"),
+            (Type::Primitive(PrimitiveType::Float), "float"),
+            (Type::Primitive(PrimitiveType::Double), "double"),
+            (Type::Primitive(PrimitiveType::Date), "date"),
+            (Type::Primitive(PrimitiveType::Time), "time"),
+            (Type::Primitive(PrimitiveType::Timestamp), "timestamp"),
+            (Type::Primitive(PrimitiveType::Timestamptz), "timestamptz"),
+            (Type::Primitive(PrimitiveType::TimestampNs), "timestamp_ns"),
+            (
+                Type::Primitive(PrimitiveType::TimestamptzNs),
+                "timestamptz_ns",
+            ),
+            (Type::Primitive(PrimitiveType::String), "string"),
+            (Type::Primitive(PrimitiveType::Uuid), "uuid"),
+            (Type::Primitive(PrimitiveType::Binary), "binary"),
+            (
+                Type::Primitive(PrimitiveType::Decimal {
+                    precision: 10,
+                    scale: 2,
+                }),
+                "decimal(10,2)",
+            ),
         ];
 
         for (ty, expected) in cases {
-assert_eq!(
-iceberg_type_to_json_string(&ty),
-expected,
-"mismatch for {:?}",
-ty
-);
+            assert_eq!(
+                iceberg_type_to_json_string(&ty),
+                expected,
+                "mismatch for {:?}",
+                ty
+            );
         }
     }
 
@@ -992,23 +986,23 @@ ty
         use std::sync::Arc;
 
         let struct_type = Type::Struct(StructType::new(vec![
-Arc::new(NestedField::required(
-1,
-"speed",
-Type::Primitive(PrimitiveType::Double),
-)),
-Arc::new(NestedField::optional(
-2,
-"unit",
-Type::Primitive(PrimitiveType::String),
-)),
+            Arc::new(NestedField::required(
+                1,
+                "speed",
+                Type::Primitive(PrimitiveType::Double),
+            )),
+            Arc::new(NestedField::optional(
+                2,
+                "unit",
+                Type::Primitive(PrimitiveType::String),
+            )),
         ]));
 
         let json_str = iceberg_type_to_json_string(&struct_type);
 
         // Must produce valid JSON, not the Display format "struct<...>"
         let parsed: serde_json::Value =
-serde_json::from_str(&json_str).expect("must be valid JSON");
+            serde_json::from_str(&json_str).expect("must be valid JSON");
         assert_eq!(parsed["type"], "struct");
         assert!(parsed["fields"].is_array());
         let fields = parsed["fields"].as_array().unwrap();
@@ -1025,15 +1019,15 @@ serde_json::from_str(&json_str).expect("must be valid JSON");
         use std::sync::Arc;
 
         let list_type = Type::List(ListType::new(Arc::new(NestedField::list_element(
-1,
-Type::Primitive(PrimitiveType::String),
-false,
+            1,
+            Type::Primitive(PrimitiveType::String),
+            false,
         ))));
 
         let json_str = iceberg_type_to_json_string(&list_type);
 
         let parsed: serde_json::Value =
-serde_json::from_str(&json_str).expect("must be valid JSON");
+            serde_json::from_str(&json_str).expect("must be valid JSON");
         assert_eq!(parsed["type"], "list");
         assert_eq!(parsed["element"], "string");
         assert_eq!(parsed["element-required"], false);
@@ -1044,16 +1038,16 @@ serde_json::from_str(&json_str).expect("must be valid JSON");
         use ::iceberg::spec::{MapType, PrimitiveType, Type};
 
         let map_type = Type::Map(MapType::optional(
-1,
-Type::Primitive(PrimitiveType::String),
-2,
-Type::Primitive(PrimitiveType::Long),
+            1,
+            Type::Primitive(PrimitiveType::String),
+            2,
+            Type::Primitive(PrimitiveType::Long),
         ));
 
         let json_str = iceberg_type_to_json_string(&map_type);
 
         let parsed: serde_json::Value =
-serde_json::from_str(&json_str).expect("must be valid JSON");
+            serde_json::from_str(&json_str).expect("must be valid JSON");
         assert_eq!(parsed["type"], "map");
         assert_eq!(parsed["key"], "string");
         assert_eq!(parsed["value"], "long");
@@ -1066,32 +1060,32 @@ serde_json::from_str(&json_str).expect("must be valid JSON");
         use std::sync::Arc;
 
         let inner_struct = Type::Struct(StructType::new(vec![
-Arc::new(NestedField::required(
-10,
-"x",
-Type::Primitive(PrimitiveType::Double),
-)),
-Arc::new(NestedField::required(
-11,
-"y",
-Type::Primitive(PrimitiveType::Double),
-)),
+            Arc::new(NestedField::required(
+                10,
+                "x",
+                Type::Primitive(PrimitiveType::Double),
+            )),
+            Arc::new(NestedField::required(
+                11,
+                "y",
+                Type::Primitive(PrimitiveType::Double),
+            )),
         ]));
         let list_of_structs = Type::List(ListType::new(Arc::new(NestedField::list_element(
-5,
-inner_struct,
-true,
+            5,
+            inner_struct,
+            true,
         ))));
 
         let json_str = iceberg_type_to_json_string(&list_of_structs);
         let parsed: serde_json::Value =
-serde_json::from_str(&json_str).expect("must be valid JSON");
+            serde_json::from_str(&json_str).expect("must be valid JSON");
 
         assert_eq!(parsed["type"], "list");
         assert_eq!(parsed["element"]["type"], "struct");
         let element_fields = parsed["element"]["fields"]
-.as_array()
-.expect("struct fields must be an array");
+            .as_array()
+            .expect("struct fields must be an array");
         assert_eq!(element_fields.len(), 2);
         assert_eq!(element_fields[0]["name"], "x");
         assert_eq!(element_fields[1]["name"], "y");
@@ -1105,18 +1099,20 @@ serde_json::from_str(&json_str).expect("must be valid JSON");
         use ::iceberg::spec::{NestedField, PrimitiveType, StructType, Type};
         use std::sync::Arc;
 
-        let struct_type = Type::Struct(StructType::new(vec![Arc::new(
-NestedField::required(1, "field1", Type::Primitive(PrimitiveType::String)),
-        )]));
+        let struct_type = Type::Struct(StructType::new(vec![Arc::new(NestedField::required(
+            1,
+            "field1",
+            Type::Primitive(PrimitiveType::String),
+        ))]));
 
         let result = iceberg_type_to_json_string(&struct_type);
         assert!(
-result.starts_with('{'),
-"nested types must produce JSON, not Display format"
+            result.starts_with('{'),
+            "nested types must produce JSON, not Display format"
         );
         assert!(
-!result.contains('<'),
-"must not contain angle brackets from Display format"
+            !result.contains('<'),
+            "must not contain angle brackets from Display format"
         );
     }
 
@@ -1124,40 +1120,38 @@ result.starts_with('{'),
     fn iceberg_type_to_json_roundtrip_via_parse() {
         // The output of iceberg_type_to_json_string must be parseable by
         // parse_iceberg_type for all nested types.
-        use ::iceberg::spec::{
-ListType, MapType, NestedField, PrimitiveType, StructType, Type,
-        };
+        use ::iceberg::spec::{ListType, MapType, NestedField, PrimitiveType, StructType, Type};
         use std::sync::Arc;
 
         let struct_type = Type::Struct(StructType::new(vec![
-Arc::new(NestedField::required(
-1,
-"a",
-Type::Primitive(PrimitiveType::Long),
-)),
-Arc::new(NestedField::optional(
-2,
-"b",
-Type::Primitive(PrimitiveType::String),
-)),
+            Arc::new(NestedField::required(
+                1,
+                "a",
+                Type::Primitive(PrimitiveType::Long),
+            )),
+            Arc::new(NestedField::optional(
+                2,
+                "b",
+                Type::Primitive(PrimitiveType::String),
+            )),
         ]));
         let list_type = Type::List(ListType::new(Arc::new(NestedField::list_element(
-3,
-Type::Primitive(PrimitiveType::Double),
-false,
+            3,
+            Type::Primitive(PrimitiveType::Double),
+            false,
         ))));
         let map_type = Type::Map(MapType::optional(
-4,
-Type::Primitive(PrimitiveType::String),
-5,
-Type::Primitive(PrimitiveType::Long),
+            4,
+            Type::Primitive(PrimitiveType::String),
+            5,
+            Type::Primitive(PrimitiveType::Long),
         ));
 
         for ty in [struct_type, list_type, map_type] {
-let json_str = iceberg_type_to_json_string(&ty);
-let parsed = parse_iceberg_type(&json_str)
-.expect("iceberg_type_to_json_string output must be parseable");
-assert_eq!(parsed, ty, "round-trip failed for {:?}", ty);
+            let json_str = iceberg_type_to_json_string(&ty);
+            let parsed = parse_iceberg_type(&json_str)
+                .expect("iceberg_type_to_json_string output must be parseable");
+            assert_eq!(parsed, ty, "round-trip failed for {:?}", ty);
         }
     }
 
@@ -1166,50 +1160,48 @@ assert_eq!(parsed, ty, "round-trip failed for {:?}", ty);
         // Build an iceberg Schema containing a struct field and a list field,
         // then verify the conversion to TableSchema preserves the nested types
         // in JSON format.
-        use ::iceberg::spec::{
-ListType, NestedField, PrimitiveType, Schema, StructType, Type,
-        };
+        use ::iceberg::spec::{ListType, NestedField, PrimitiveType, Schema, StructType, Type};
         use std::sync::Arc;
 
         let struct_field = NestedField::optional(
-2,
-"telemetry",
-Type::Struct(StructType::new(vec![
-Arc::new(NestedField::required(
-10,
-"speed",
-Type::Primitive(PrimitiveType::Double),
-)),
-Arc::new(NestedField::optional(
-11,
-"gear",
-Type::Primitive(PrimitiveType::Int),
-)),
-])),
+            2,
+            "telemetry",
+            Type::Struct(StructType::new(vec![
+                Arc::new(NestedField::required(
+                    10,
+                    "speed",
+                    Type::Primitive(PrimitiveType::Double),
+                )),
+                Arc::new(NestedField::optional(
+                    11,
+                    "gear",
+                    Type::Primitive(PrimitiveType::Int),
+                )),
+            ])),
         );
         let list_field = NestedField::optional(
-3,
-"tags",
-Type::List(ListType::new(Arc::new(NestedField::list_element(
-20,
-Type::Primitive(PrimitiveType::String),
-false,
-)))),
+            3,
+            "tags",
+            Type::List(ListType::new(Arc::new(NestedField::list_element(
+                20,
+                Type::Primitive(PrimitiveType::String),
+                false,
+            )))),
         );
 
         let iceberg_schema = Schema::builder()
-.with_schema_id(5)
-.with_fields(vec![
-Arc::new(NestedField::required(
-1,
-"id",
-Type::Primitive(PrimitiveType::Long),
-)),
-Arc::new(struct_field),
-Arc::new(list_field),
-])
-.build()
-.unwrap();
+            .with_schema_id(5)
+            .with_fields(vec![
+                Arc::new(NestedField::required(
+                    1,
+                    "id",
+                    Type::Primitive(PrimitiveType::Long),
+                )),
+                Arc::new(struct_field),
+                Arc::new(list_field),
+            ])
+            .build()
+            .unwrap();
 
         let table_schema = iceberg_schema_to_table_schema(&iceberg_schema);
 
@@ -1224,11 +1216,11 @@ Arc::new(list_field),
         let telemetry = &table_schema.fields[1];
         assert_eq!(telemetry.name, "telemetry");
         assert!(
-telemetry.field_type.starts_with('{'),
-"struct field must be JSON"
+            telemetry.field_type.starts_with('{'),
+            "struct field must be JSON"
         );
         let telemetry_json: serde_json::Value =
-serde_json::from_str(&telemetry.field_type).unwrap();
+            serde_json::from_str(&telemetry.field_type).unwrap();
         assert_eq!(telemetry_json["type"], "struct");
         let fields = telemetry_json["fields"].as_array().unwrap();
         assert_eq!(fields.len(), 2);
@@ -1241,8 +1233,7 @@ serde_json::from_str(&telemetry.field_type).unwrap();
         let tags = &table_schema.fields[2];
         assert_eq!(tags.name, "tags");
         assert!(tags.field_type.starts_with('{'), "list field must be JSON");
-        let tags_json: serde_json::Value =
-serde_json::from_str(&tags.field_type).unwrap();
+        let tags_json: serde_json::Value = serde_json::from_str(&tags.field_type).unwrap();
         assert_eq!(tags_json["type"], "list");
         assert_eq!(tags_json["element"], "string");
     }
@@ -1271,8 +1262,7 @@ doc: None,
 ],
         };
 
-        let iceberg_schema =
-table_schema_to_iceberg_schema(&schema_with_nested).unwrap();
+        let iceberg_schema = table_schema_to_iceberg_schema(&schema_with_nested).unwrap();
         let back = iceberg_schema_to_table_schema(&iceberg_schema);
 
         assert_eq!(back.schema_id, schema_with_nested.schema_id);
@@ -1281,7 +1271,7 @@ table_schema_to_iceberg_schema(&schema_with_nested).unwrap();
 
         // The nested struct JSON must round-trip
         let telemetry: serde_json::Value =
-serde_json::from_str(&back.fields[1].field_type).unwrap();
+            serde_json::from_str(&back.fields[1].field_type).unwrap();
         assert_eq!(telemetry["type"], "struct");
         let fields = telemetry["fields"].as_array().unwrap();
         assert_eq!(fields.len(), 2);
