@@ -25,11 +25,14 @@ use iceberg_catalog_rest::{
     RestCatalog, RestCatalogBuilder, REST_CATALOG_PROP_URI, REST_CATALOG_PROP_WAREHOUSE,
 };
 use iceberg_storage_opendal::OpenDalResolvingStorageFactory;
-use std::collections::HashMap;
+use parking_lot::Mutex;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, info};
+
+const RECENT_MANIFEST_LIST_LIMIT: usize = 64;
 
 /// Result of a real Iceberg append commit.
 #[derive(Debug, Clone)]
@@ -47,6 +50,9 @@ pub struct OfficialCommitResult {
 pub struct OfficialRestCommitter {
     catalog: RestCatalog,
     warehouse_path: String,
+    /// Bounded commit metadata cache used to preserve the real manifest-list
+    /// path through the catalog abstraction without changing its result type.
+    recent_manifest_lists: Mutex<VecDeque<(i64, String)>>,
 }
 
 impl OfficialRestCommitter {
@@ -89,6 +95,7 @@ impl OfficialRestCommitter {
         Ok(Self {
             catalog,
             warehouse_path: config.warehouse_path.clone(),
+            recent_manifest_lists: Mutex::new(VecDeque::new()),
         })
     }
 
@@ -109,6 +116,20 @@ impl OfficialRestCommitter {
             summary,
         )
         .await
+    }
+
+    fn remember_manifest_list(&self, result: &OfficialCommitResult) {
+        let mut recent = self.recent_manifest_lists.lock();
+        if let Some(index) = recent
+            .iter()
+            .position(|(snapshot_id, _)| *snapshot_id == result.snapshot_id)
+        {
+            recent.remove(index);
+        }
+        recent.push_back((result.snapshot_id, result.manifest_list_path.clone()));
+        while recent.len() > RECENT_MANIFEST_LIST_LIMIT {
+            recent.pop_front();
+        }
     }
 }
 
@@ -246,20 +267,24 @@ impl CatalogOperations for OfficialRestCommitter {
         // NOTE: `commit.expected_snapshot_id` is intentionally not used here.
         // Optimistic concurrency (CAS) is enforced by the official
         // `Transaction` inside `commit_append_with_catalog`, which loads the
-        // current table metadata and lets the REST catalog validate the commit
-        // requirements. The caller-supplied `expected_snapshot_id` (derived
-        // from the metadata cache) would only duplicate that check.
+        // current table metadata and attaches a `RefSnapshotIdMatch`
+        // requirement that the REST catalog validates at commit time. The
+        // caller-supplied `expected_snapshot_id` (derived from the metadata
+        // cache) would only duplicate that check.
         //
-        // K2I ingestion is append-only, so `files_to_remove` is always empty;
-        // this path performs a `fast_append` and does not support removals. We
-        // assert the invariant rather than silently dropping removals.
-        debug_assert!(
-            commit.files_to_remove.is_empty(),
-            "OfficialRestCommitter.commit_snapshot only supports appends; \
-             files_to_remove must be empty"
-        );
+        // This path performs a `fast_append` and cannot remove files. Ingestion
+        // never requests removals, but maintenance compaction does — silently
+        // dropping them would leave compacted rows duplicated, so removals are
+        // rejected with a hard error.
+        if !commit.files_to_remove.is_empty() {
+            return Err(Error::Iceberg(IcebergError::SnapshotCommit(format!(
+                "official REST catalog append commits do not support removing files; \
+                 refusing to ignore {} requested removals",
+                commit.files_to_remove.len()
+            ))));
+        }
+
         let files_added = commit.files_to_add.len();
-        let files_removed = commit.files_to_remove.len();
 
         let result = commit_append_with_catalog(
             &self.catalog,
@@ -270,15 +295,32 @@ impl CatalogOperations for OfficialRestCommitter {
             commit.summary,
         )
         .await?;
+        self.remember_manifest_list(&result);
 
         Ok(SnapshotCommitResult {
             snapshot_id: result.snapshot_id,
             committed_at: chrono::Utc::now(),
             files_added,
-            files_removed,
+            files_removed: 0,
         })
     }
 
+    fn manifest_list_path_for_snapshot(&self, snapshot_id: i64) -> Option<String> {
+        self.recent_manifest_lists
+            .lock()
+            .iter()
+            .find(|(candidate, _)| *candidate == snapshot_id)
+            .map(|(_, path)| path.clone())
+    }
+
+    /// Additive-only schema evolution through the official `Transaction` API.
+    ///
+    /// `expected_schema_id` is intentionally unused: the transaction loads the
+    /// current table metadata and the REST catalog validates the commit
+    /// requirements derived from it, so a caller-side schema-id assertion
+    /// would only duplicate that check. Fields whose names already exist are
+    /// skipped — callers are expected to run `diff_table_schema` first, which
+    /// rejects type or requiredness changes as breaking.
     async fn update_schema(
         &self,
         namespace: &str,
@@ -399,7 +441,9 @@ fn iceberg_type_to_json_string(ty: &::iceberg::spec::Type) -> String {
                 ::iceberg::spec::PrimitiveType::TimestamptzNs => "timestamptz_ns",
                 ::iceberg::spec::PrimitiveType::String => "string",
                 ::iceberg::spec::PrimitiveType::Uuid => "uuid",
-                ::iceberg::spec::PrimitiveType::Fixed(_) => "binary",
+                ::iceberg::spec::PrimitiveType::Fixed(len) => {
+                    return format!("fixed[{}]", len);
+                }
                 ::iceberg::spec::PrimitiveType::Binary => "binary",
                 ::iceberg::spec::PrimitiveType::Decimal { precision, scale } => {
                     return format!("decimal({},{})", precision, scale);
@@ -772,16 +816,13 @@ fn apply_file_io_props(config: &IcebergConfig, props: &mut HashMap<String, Strin
 
 fn map_iceberg_error(err: ::iceberg::Error) -> Error {
     let message = err.to_string();
-    if message.contains("TableNotFound") || message.contains("does not exist") {
-        Error::Iceberg(IcebergError::TableNotFound(message))
-    } else if message.contains("CatalogCommitConflicts") || message.contains("requirements failed")
-    {
-        Error::Iceberg(IcebergError::CasConflict {
+    match err.kind() {
+        ::iceberg::ErrorKind::TableNotFound => Error::Iceberg(IcebergError::TableNotFound(message)),
+        ::iceberg::ErrorKind::CatalogCommitConflicts => Error::Iceberg(IcebergError::CasConflict {
             expected: -1,
             actual: -1,
-        })
-    } else {
-        Error::Iceberg(IcebergError::Other(message))
+        }),
+        _ => Error::Iceberg(IcebergError::Other(message)),
     }
 }
 
@@ -811,6 +852,57 @@ mod tests {
                 },
             ],
         }
+    }
+
+    fn rest_config(rest_uri: &str) -> IcebergConfig {
+        toml::from_str(&format!(
+            r#"
+catalog_type = "rest"
+warehouse_path = "/tmp/k2i-official-tests"
+database_name = "analytics"
+table_name = "events"
+rest_uri = {rest_uri:?}
+"#
+        ))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn rejects_removals_and_keeps_manifest_cache_bounded() {
+        let committer = OfficialRestCommitter::new(&rest_config("http://127.0.0.1:1"))
+            .await
+            .unwrap();
+
+        for snapshot_id in 0..=RECENT_MANIFEST_LIST_LIMIT as i64 {
+            committer.remember_manifest_list(&OfficialCommitResult {
+                snapshot_id,
+                manifest_list_path: format!("metadata/snap-{snapshot_id}.avro"),
+            });
+        }
+        assert_eq!(committer.manifest_list_path_for_snapshot(0), None);
+        assert_eq!(
+            committer.manifest_list_path_for_snapshot(RECENT_MANIFEST_LIST_LIMIT as i64),
+            Some(format!("metadata/snap-{}.avro", RECENT_MANIFEST_LIST_LIMIT))
+        );
+
+        let error = committer
+            .commit_snapshot(
+                "analytics",
+                "events",
+                SnapshotCommit {
+                    expected_snapshot_id: None,
+                    files_to_add: vec![],
+                    files_to_remove: vec!["data/old.parquet".into()],
+                    summary: HashMap::new(),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Iceberg(IcebergError::SnapshotCommit(message))
+                if message.contains("refusing to ignore 1 requested removals")
+        ));
     }
 
     #[test]
@@ -961,6 +1053,7 @@ mod tests {
             (Type::Primitive(PrimitiveType::String), "string"),
             (Type::Primitive(PrimitiveType::Uuid), "uuid"),
             (Type::Primitive(PrimitiveType::Binary), "binary"),
+            (Type::Primitive(PrimitiveType::Fixed(16)), "fixed[16]"),
             (
                 Type::Primitive(PrimitiveType::Decimal {
                     precision: 10,
@@ -1147,7 +1240,13 @@ mod tests {
             Type::Primitive(PrimitiveType::Long),
         ));
 
-        for ty in [struct_type, list_type, map_type] {
+        let fixed_type = Type::Primitive(PrimitiveType::Fixed(16));
+        let decimal_type = Type::Primitive(PrimitiveType::Decimal {
+            precision: 10,
+            scale: 2,
+        });
+
+        for ty in [struct_type, list_type, map_type, fixed_type, decimal_type] {
             let json_str = iceberg_type_to_json_string(&ty);
             let parsed = parse_iceberg_type(&json_str)
                 .expect("iceberg_type_to_json_string output must be parseable");
