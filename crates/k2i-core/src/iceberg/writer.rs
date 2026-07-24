@@ -503,7 +503,7 @@ impl IcebergWriter {
 
         let props = WriterProperties::builder()
             .set_compression(compression)
-            .set_max_row_group_size(128 * 1024) // 128K rows per row group
+            .set_max_row_group_row_count(Some(128 * 1024)) // 128K rows per row group
             .set_write_batch_size(1024)
             .build();
 

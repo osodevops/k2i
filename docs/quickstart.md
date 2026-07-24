@@ -7,7 +7,7 @@ This quickstart gives you two paths:
 
 ## Prerequisites
 
-- Rust 1.85+ for building from source.
+- Rust 1.94+ for building from source.
 - Docker and Docker Compose for local E2E validation.
 - Access to Kafka and an Iceberg-compatible catalog for manual runs.
 

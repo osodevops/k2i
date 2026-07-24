@@ -5,8 +5,8 @@ set -euo pipefail
 # unmaintained dependency, unsound dependency, or yanked crate.
 #
 # Runtime exceptions pinned by current upstream dependency ranges:
-# - iceberg 0.7, object_store 0.11, and the AWS SDK pin the affected XML and
-#   legacy webpki versions. K2I parses responses only from explicitly
+# - The current iceberg, object_store, and AWS SDK dependency graph pins the
+#   affected XML and legacy webpki versions. K2I parses responses only from explicitly
 #   configured storage services, does not configure CRLs, and still verifies
 #   TLS certificates (RUSTSEC-2026-0194, -0195, -0098, -0099, and -0104).
 # - SQLx's target-specific MySQL graph includes rsa, but K2I enables SQLite and

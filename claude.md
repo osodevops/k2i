@@ -7,6 +7,7 @@ K2I is a production-grade streaming ingestion engine written in Rust that bridge
 ## Why We Built It
 
 The data engineering world forces a painful trade-off:
+
 - **Real-time systems** (Flink, KSQL): millisecond latency but high cost and operational complexity
 - **Batch systems** (Spark, Airflow): low cost but minutes-to-hours of latency
 
@@ -15,16 +16,20 @@ K2I delivers **sub-second data freshness at batch economics** through a single-p
 ## Core Concepts
 
 ### Hot/Cold Data Separation
+
 - **Hot buffer**: In-memory Arrow RecordBatches with DashMap indexes for <1ms query lookups
 - **Cold storage**: Parquet files on object storage (S3/GCS/Azure) committed to Iceberg catalogs
 
 ### Single-Process Simplicity
+
 No cluster coordination, no ZooKeeper, no JobManager. One binary, one config file, production-ready. This is a deliberate architectural choice — not a limitation.
 
 ### Transaction Log Durability
+
 Append-only write-ahead log with CRC32 checksums ensures crash recovery without data loss. Offset ranges are tracked for idempotency, enabling exactly-once semantics without distributed transactions.
 
 ### Defensive Design
+
 Backpressure propagation from buffer to Kafka consumer, circuit breakers for downstream failures, exponential backoff retry, and graceful degradation under load.
 
 ## Architecture
@@ -77,13 +82,13 @@ config/
 
 ## Tech Stack
 
-- **Language**: Rust 1.85+ (edition 2021)
+- **Language**: Rust 1.94+ (edition 2021)
 - **Async Runtime**: Tokio
 - **HTTP**: Axum
 - **Kafka**: rdkafka (librdkafka bindings, SASL/SSL)
-- **Columnar**: Apache Arrow 54
-- **File Format**: Parquet 54 (Snappy/Zstd/LZ4)
-- **Table Format**: Iceberg 0.7
+- **Columnar**: Apache Arrow 58
+- **File Format**: Parquet 58 (Snappy/Zstd/LZ4)
+- **Table Format**: Iceberg 0.10
 - **Object Storage**: object_store 0.11
 - **Concurrency**: DashMap 6
 - **Metrics**: Prometheus 0.13
@@ -103,7 +108,7 @@ config/
 ## Crash Recovery Guarantees
 
 | Crash Point | Recovery Behavior |
-|-------------|-------------------|
+| ------------- | ------------------- |
 | Before FlushStart | Resume from last committed offset |
 | After FlushStart | Re-execute flush from buffer |
 | After ParquetWritten | File exists as orphan, cleanup later |

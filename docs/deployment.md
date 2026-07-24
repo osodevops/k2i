@@ -20,7 +20,7 @@ Avoid deploying multiple active K2I writers to the same table until conflict, re
 ## Deployment Options
 
 | Option | Use Case | Complexity |
-|--------|----------|------------|
+| -------- | ---------- | ------------ |
 | Binary | Single server, VMs | Low |
 | Docker | Containers, local dev | Low |
 | Kubernetes | Production, scaling | Medium |
@@ -77,7 +77,7 @@ after pushing, and confirms both platforms are present in the manifest list.
 
 ```dockerfile
 # Build stage
-FROM rust:1.75-bookworm AS builder
+FROM rust:1-bookworm AS builder
 
 WORKDIR /build
 
@@ -676,7 +676,7 @@ AWS IAM policy for K2I:
 ### Memory Requirements
 
 | Workload | Buffer Size | Total Memory |
-|----------|-------------|--------------|
+| ---------- | ------------- | -------------- |
 | Light (< 1K msg/s) | 100 MB | 512 MB |
 | Medium (1-10K msg/s) | 500 MB | 2 GB |
 | Heavy (10-100K msg/s) | 2 GB | 4 GB |
@@ -685,7 +685,7 @@ AWS IAM policy for K2I:
 ### CPU Requirements
 
 | Workload | CPU Cores |
-|----------|-----------|
+| ---------- | ----------- |
 | Light | 0.5 |
 | Medium | 1 |
 | Heavy | 2 |

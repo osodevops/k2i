@@ -56,7 +56,7 @@ K2I_E2E_LOAD_MESSAGES=100000 scripts/e2e-docker-iceberg-load.sh
 ## What K2I Does
 
 | Capability | Current behavior |
-|---|---|
+| --- | --- |
 | Kafka ingest | Uses `rdkafka`, manual offset management, batching, retry, and backpressure |
 | Payload decoding | Raw bytes, JSON-compatible raw payloads, and Confluent-framed Protobuf |
 | Schema Registry | Resolves Protobuf descriptors, caches schemas in memory and on disk, supports subject strategies |
@@ -119,7 +119,7 @@ Hot-path visibility is local and intended for co-located readers or sidecars. Co
 ## K2I vs Alternatives
 
 | Dimension | K2I | Kafka Connect Iceberg Sink | Flink Iceberg Sink | Spark Micro-Batch | Confluent TableFlow | Moonlink |
-|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- |
 | Primary fit | Final-form Kafka events to Iceberg | Connector-based ingestion | Stream processing and transforms | Batch/micro-batch ETL | Managed Confluent pipeline | Postgres CDC to Iceberg |
 | Deployment | Single Rust binary/container | Kafka Connect cluster | Flink cluster | Spark runtime | Managed service | Service/extension stack |
 | Transformations | Intentionally minimal | SMT/basic connector config | Strong | Strong | Limited/managed | CDC-focused |
@@ -169,7 +169,7 @@ cargo build --release
 
 Binary location: `target/release/k2i`
 
-Source builds require Rust 1.75+, CMake, and OpenSSL development libraries. Kerberos/GSSAPI support is not enabled by default; if you need it, add the `gssapi` feature to `rdkafka` and install the matching SASL development libraries for your platform.
+Source builds require Rust 1.94+, CMake, and OpenSSL development libraries. Kerberos/GSSAPI support is not enabled by default; if you need it, add the `gssapi` feature to `rdkafka` and install the matching SASL development libraries for your platform.
 
 ## Quick Start
 
@@ -265,7 +265,7 @@ See [Production Readiness](docs/production-readiness.md) for the detailed review
 ## Documentation
 
 | Guide | Description |
-|---|---|
+| --- | --- |
 | [Kafka to Iceberg](docs/kafka-to-iceberg.md) | Main explanation of the K2I data path |
 | [Quickstart](docs/quickstart.md) | Local proof and first manual run |
 | [Configuration](docs/configuration.md) | Complete TOML reference |
@@ -323,7 +323,7 @@ See the full [FAQ](docs/faq.md).
 
 ## Looking for Enterprise Apache Kafka Support?
 
-[OSO](https://oso.sh) engineers are focused on deploying, operating, and maintaining Apache Kafka platforms. If you need SLA-backed support, security review, deployment help, or a broader data lakehouse strategy, contact **enquiries@oso.sh** or visit [oso.sh/contact](https://oso.sh/contact/).
+[OSO](https://oso.sh) engineers are focused on deploying, operating, and maintaining Apache Kafka platforms. If you need SLA-backed support, security review, deployment help, or a broader data lakehouse strategy, contact **<enquiries@oso.sh>** or visit [oso.sh/contact](https://oso.sh/contact/).
 
 ## Contributing
 
