@@ -7,16 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Implemented `create_gcs_store()` via `object_store::gcp::GoogleCloudStorageBuilder`, falling through to Application Default Credentials (Workload Identity on GKE) when `gcs_service_account_path` is unset.
+- Implemented `create_azure_store()` via `object_store::azure::MicrosoftAzureBuilder`, falling through to `DefaultAzureCredential` (Managed Identity on AKS) when `azure_access_key` is unset.
+- Documented that omitting `aws_access_key_id`/`aws_secret_access_key` activates the `AmazonS3Builder` default credential chain (env vars → IMDS → IRSA), unblocking EKS with IRSA and EC2 instance profiles without explicit config.
+- Added `gcs_bucket_name`, `gcs_service_account_path`, `azure_container_name`, `azure_storage_account_name`, and `azure_access_key` fields to `IcebergConfig` for credential overrides and the Azure-required account name.
+
 ### Changed
 
+- Bumped the workspace version to 0.3.0 to absorb the semver-major addition of public fields on the externally-constructible `IcebergConfig` struct. The 0.x convention treats a minor bump (0.2 → 0.3) as the breaking-change boundary.
 - Upgraded the official Apache Iceberg Rust client from 0.7 to 0.10.0 and the Arrow/Parquet ecosystem from 54 to 58.
 - Removed the temporary standalone REST `update_schema` fallback now that `Transaction::update_schema()` is available in `iceberg-rust` 0.10.0.
 - Simplified `OfficialRestCommitter` by delegating all catalog operations to the official `RestCatalog` transaction APIs.
 
 ### Fixed
 
-- Avoided manual OAuth2, route resolution, and multipart namespace encoding logic previously needed for the schema-update fallback.
+- Aligned cloud object store uploads with the warehouse path recorded by the catalog/txlog: `IcebergWriter` now derives an in-bucket prefix from `warehouse_path` (e.g. `warehouse` for `s3://bucket/warehouse`) and prepends it to every data file path, fixing a silent mismatch where uploads landed at `s3://bucket/data/...` while the catalog expected `s3://bucket/warehouse/data/...`. Preexisting on S3; now applied uniformly to GCS and Azure.
+- Azure container parsing now handles the Hadoop ABFS form `abfs://container@account.dfs.core.windows.net/path` by extracting the container before the `@`, instead of treating the whole `container@account` segment as the container.
 - Aligned Parquet writer properties with the parquet 58 API (`set_max_row_group_row_count`).
+- Avoided manual OAuth2, route resolution, and multipart namespace encoding logic previously needed for the schema-update fallback.
 
 ### Requirements
 

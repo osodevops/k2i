@@ -167,11 +167,11 @@ impl KafkaConsumerBuilder {
         if let Some(ref mechanism) = self.config.security.sasl_mechanism {
             client_config.set("sasl.mechanism", mechanism);
         }
-        if let Some(ref username) = self.config.security.sasl_username {
-            client_config.set("sasl.username", username);
+        if let Some(username) = &self.config.security.sasl_username {
+            client_config.set("sasl.username", username.expose());
         }
-        if let Some(ref password) = self.config.security.sasl_password {
-            client_config.set("sasl.password", password);
+        if let Some(password) = &self.config.security.sasl_password {
+            client_config.set("sasl.password", password.expose());
         }
         if let Some(ref path) = self.config.security.ssl_ca_location {
             client_config.set("ssl.ca.location", path.to_string_lossy().as_ref());

@@ -3027,7 +3027,7 @@ dependencies = [
 
 [[package]]
 name = "k2i-cli"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -3052,7 +3052,7 @@ dependencies = [
 
 [[package]]
 name = "k2i-core"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3110,7 +3110,7 @@ dependencies = [
 
 [[package]]
 name = "k2i-e2e-runner"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -3128,7 +3128,7 @@ dependencies = [
 
 [[package]]
 name = "k2i-rpc"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "bincode",
  "chrono",
@@ -3138,7 +3138,7 @@ dependencies = [
 
 [[package]]
 name = "k2i-rpc-server"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "bytes",

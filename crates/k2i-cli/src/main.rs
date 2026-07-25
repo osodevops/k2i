@@ -513,8 +513,5 @@ async fn execute_command(cli: Cli) -> Result<()> {
 
 fn load_config(path: &Option<PathBuf>) -> Result<Config> {
     let path = path.clone().unwrap_or_else(|| PathBuf::from("config.toml"));
-
-    let content = std::fs::read_to_string(&path)?;
-    let config: Config = toml::from_str(&content)?;
-    Ok(config)
+    Ok(Config::from_file(&path)?)
 }

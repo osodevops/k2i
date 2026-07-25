@@ -115,6 +115,10 @@ impl From<SnapshotCommitResult> for CatalogCommitOutcome {
 pub struct IcebergWriter {
     config: IcebergConfig,
     object_store: Arc<dyn ObjectStore>,
+    /// In-bucket prefix derived from `warehouse_path` for cloud backends where
+    /// the object store root is the bucket, not the warehouse. `None` for local
+    /// filesystem (handled by `LocalFileSystem::new_with_prefix`).
+    warehouse_prefix: Option<String>,
     txlog: Option<Arc<TransactionLog>>,
     write_count: AtomicU64,
     /// Optional catalog operations for real catalog integration
@@ -186,10 +190,11 @@ impl IcebergWriterBuilder {
 
     /// Build the IcebergWriter.
     pub async fn build(self) -> Result<IcebergWriter> {
-        let object_store = IcebergWriter::create_object_store(&self.config)?;
+        let (object_store, warehouse_prefix) = IcebergWriter::create_object_store(&self.config)?;
         Ok(IcebergWriter {
             config: self.config,
             object_store,
+            warehouse_prefix,
             txlog: self.txlog,
             write_count: AtomicU64::new(0),
             catalog: self.catalog,
@@ -235,7 +240,15 @@ impl IcebergWriter {
     }
 
     /// Create object store based on configuration.
-    fn create_object_store(config: &IcebergConfig) -> Result<Arc<dyn ObjectStore>> {
+    ///
+    /// Returns the store and the in-bucket warehouse prefix to prepend to every
+    /// data/metadata path the writer uploads. For cloud backends the store root
+    /// is the bucket, so the prefix keeps uploads aligned with the warehouse
+    /// path recorded by the catalog/txlog. For local filesystem the prefix is
+    /// `None` because `LocalFileSystem::new_with_prefix` handles it.
+    fn create_object_store(
+        config: &IcebergConfig,
+    ) -> Result<(Arc<dyn ObjectStore>, Option<String>)> {
         let warehouse_path = &config.warehouse_path;
 
         if warehouse_path.starts_with("s3://") {
@@ -250,7 +263,38 @@ impl IcebergWriter {
         }
     }
 
-    fn create_s3_store(config: &IcebergConfig) -> Result<Arc<dyn ObjectStore>> {
+    /// Extract the in-bucket prefix from a cloud warehouse path.
+    ///
+    /// Given `gs://bucket/some/prefix` returns `Some("some/prefix")`. Returns
+    /// `None` when the path has no subpath past the bucket (e.g. `s3://bucket`).
+    fn warehouse_prefix_after_bucket(scheme: &str, warehouse_path: &str) -> Option<String> {
+        let after_scheme = warehouse_path.strip_prefix(scheme)?;
+        let after_bucket = after_scheme.split_once('/')?.1;
+        let trimmed = after_bucket.trim_matches('/');
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    }
+
+    /// Extract the in-bucket prefix from an Azure warehouse path that may use
+    /// the Hadoop ABFS form `abfs://container@account.../prefix` or the simpler
+    /// `az://container/prefix`.
+    fn warehouse_prefix_after_azure_container(warehouse_path: &str) -> Option<String> {
+        let after_scheme = warehouse_path
+            .strip_prefix("az://")
+            .or_else(|| warehouse_path.strip_prefix("abfs://"))?;
+        let after_container = after_scheme.split_once('/')?.1;
+        let trimmed = after_container.trim_matches('/');
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    }
+
+    fn create_s3_store(config: &IcebergConfig) -> Result<(Arc<dyn ObjectStore>, Option<String>)> {
         use object_store::aws::AmazonS3Builder;
 
         let bucket = config
@@ -261,21 +305,28 @@ impl IcebergWriter {
                 Error::Iceberg(IcebergError::CatalogConnection("Invalid S3 path".into()))
             })?;
 
+        let warehouse_prefix = Self::warehouse_prefix_after_bucket("s3://", &config.warehouse_path);
+
         let mut builder = AmazonS3Builder::new().with_bucket_name(bucket);
 
-        if let Some(ref region) = config.aws_region {
+        if let Some(region) = &config.aws_region {
             builder = builder.with_region(region);
         }
 
-        if let Some(ref access_key) = config.aws_access_key_id {
-            builder = builder.with_access_key_id(access_key);
+        // When access key / secret key are omitted, AmazonS3Builder falls through
+        // to the default credential chain: environment variables → IMDS → IRSA
+        // (IAM Roles for Service Accounts). This enables EKS with IRSA,
+        // EC2 instance profiles, and local dev with env vars like AWS_ACCESS_KEY_ID
+        // without any explicit config.
+        if let Some(access_key) = &config.aws_access_key_id {
+            builder = builder.with_access_key_id(access_key.expose());
         }
 
-        if let Some(ref secret_key) = config.aws_secret_access_key {
-            builder = builder.with_secret_access_key(secret_key);
+        if let Some(secret_key) = &config.aws_secret_access_key {
+            builder = builder.with_secret_access_key(secret_key.expose());
         }
 
-        if let Some(ref endpoint) = config.s3_endpoint {
+        if let Some(endpoint) = &config.s3_endpoint {
             builder = builder
                 .with_endpoint(endpoint)
                 .with_allow_http(endpoint.starts_with("http://"));
@@ -285,24 +336,108 @@ impl IcebergWriter {
             .build()
             .map_err(|e| Error::Iceberg(IcebergError::FileUpload(e.to_string())))?;
 
-        Ok(Arc::new(store))
+        Ok((Arc::new(store), warehouse_prefix))
+    }
+    fn create_gcs_store(config: &IcebergConfig) -> Result<(Arc<dyn ObjectStore>, Option<String>)> {
+        use object_store::gcp::GoogleCloudStorageBuilder;
+
+        let bucket = config
+            .gcs_bucket_name
+            .clone()
+            .or_else(|| {
+                config
+                    .warehouse_path
+                    .strip_prefix("gs://")
+                    .and_then(|s| s.split('/').next())
+                    .map(|s| s.to_string())
+            })
+            .ok_or_else(|| {
+                Error::Iceberg(IcebergError::CatalogConnection(
+                    "Invalid GCS path: could not determine bucket".into(),
+                ))
+            })?;
+
+        // The in-bucket prefix is derived from warehouse_path regardless of
+        // whether gcs_bucket_name overrides the bucket, since the override only
+        // changes the bucket and leaves the path structure intact.
+        let warehouse_prefix = Self::warehouse_prefix_after_bucket("gs://", &config.warehouse_path);
+
+        let mut builder = GoogleCloudStorageBuilder::new().with_bucket_name(&bucket);
+
+        if let Some(sa_path) = &config.gcs_service_account_path {
+            builder = builder.with_service_account_path(sa_path);
+        }
+        // When no service account path is set, the builder falls through to
+        // Application Default Credentials (Workload Identity on GKE, env vars locally).
+
+        let store = builder
+            .build()
+            .map_err(|e| Error::Iceberg(IcebergError::FileUpload(e.to_string())))?;
+
+        Ok((Arc::new(store), warehouse_prefix))
+    }
+    fn create_azure_store(
+        config: &IcebergConfig,
+    ) -> Result<(Arc<dyn ObjectStore>, Option<String>)> {
+        use object_store::azure::MicrosoftAzureBuilder;
+
+        let account_name = config.azure_storage_account_name.as_deref().ok_or_else(|| {
+            Error::Iceberg(IcebergError::CatalogConnection(
+                "Azure storage account name is required (set `azure_storage_account_name` in config)"
+                    .into(),
+            ))
+        })?;
+
+        let container = config
+            .azure_container_name
+            .clone()
+            .or_else(|| Self::parse_azure_container(&config.warehouse_path))
+            .ok_or_else(|| {
+                Error::Iceberg(IcebergError::CatalogConnection(
+                    "Invalid Azure path: could not determine container".into(),
+                ))
+            })?;
+
+        let warehouse_prefix = Self::warehouse_prefix_after_azure_container(&config.warehouse_path);
+
+        let mut builder = MicrosoftAzureBuilder::new()
+            .with_account(account_name)
+            .with_container_name(&container);
+
+        if let Some(access_key) = &config.azure_access_key {
+            builder = builder.with_access_key(access_key.expose());
+        }
+        // When no access key is set, the builder falls through to
+        // the DefaultAzureCredential chain (Managed Identity on AKS, env vars locally).
+
+        let store = builder
+            .build()
+            .map_err(|e| Error::Iceberg(IcebergError::FileUpload(e.to_string())))?;
+
+        Ok((Arc::new(store), warehouse_prefix))
     }
 
-    fn create_gcs_store(_config: &IcebergConfig) -> Result<Arc<dyn ObjectStore>> {
-        // GCS support - for now just return an error, implement when needed
-        Err(Error::Iceberg(IcebergError::CatalogConnection(
-            "GCS storage not yet implemented".into(),
-        )))
+    /// Parse the Azure container name from a warehouse path supporting both
+    /// the simple form `az://container/path` and the Hadoop ABFS form
+    /// `abfs://container@account.dfs.core.windows.net/path`.
+    fn parse_azure_container(warehouse_path: &str) -> Option<String> {
+        let after_scheme = warehouse_path
+            .strip_prefix("az://")
+            .or_else(|| warehouse_path.strip_prefix("abfs://"))?;
+        let first_segment = after_scheme.split('/').next()?;
+        // ABFS form: `container@account.dfs.core.windows.net` — take the
+        // segment before `@` as the container. Simple form has no `@`.
+        let container = first_segment.split('@').next()?;
+        if container.is_empty() {
+            None
+        } else {
+            Some(container.to_string())
+        }
     }
 
-    fn create_azure_store(_config: &IcebergConfig) -> Result<Arc<dyn ObjectStore>> {
-        // Azure support - for now just return an error, implement when needed
-        Err(Error::Iceberg(IcebergError::CatalogConnection(
-            "Azure storage not yet implemented".into(),
-        )))
-    }
-
-    fn create_local_store(config: &IcebergConfig) -> Result<Arc<dyn ObjectStore>> {
+    fn create_local_store(
+        config: &IcebergConfig,
+    ) -> Result<(Arc<dyn ObjectStore>, Option<String>)> {
         use object_store::local::LocalFileSystem;
 
         let path = std::path::Path::new(&config.warehouse_path);
@@ -324,7 +459,9 @@ impl IcebergWriter {
             )))
         })?;
 
-        Ok(Arc::new(store))
+        // LocalFileSystem::new_with_prefix already roots uploads at the
+        // warehouse path, so no in-bucket prefix is needed.
+        Ok((Arc::new(store), None))
     }
 
     /// Write a RecordBatch to Iceberg.
@@ -760,8 +897,10 @@ impl IcebergWriter {
             partition_info.min_offset, partition_info.max_offset
         );
 
-        // Format: data/{db}/{table}/{time_partition}/kafka_partition={N}/part-{uuid}-{offset_range}.parquet
-        format!(
+        // Format: [warehouse_prefix]data/{db}/{table}/{time_partition}/kafka_partition={N}/part-{uuid}-{offset_range}.parquet
+        // The warehouse_prefix (in-bucket subpath for cloud backends) keeps
+        // uploads aligned with the warehouse path recorded by the catalog/txlog.
+        let relative = format!(
             "data/{}/{}/{}/kafka_partition={}/part-{}-{}.parquet",
             self.config.database_name,
             self.config.table_name,
@@ -769,7 +908,12 @@ impl IcebergWriter {
             partition_info.kafka_partition,
             uuid,
             offset_range
-        )
+        );
+
+        match &self.warehouse_prefix {
+            Some(prefix) => format!("{prefix}/{relative}"),
+            None => relative,
+        }
     }
 
     /// Extract partition information from a RecordBatch.
@@ -891,6 +1035,11 @@ mod tests {
             aws_access_key_id: None,
             aws_secret_access_key: None,
             s3_endpoint: None,
+            gcs_bucket_name: None,
+            gcs_service_account_path: None,
+            azure_container_name: None,
+            azure_storage_account_name: None,
+            azure_access_key: None,
             catalog_manager: Default::default(),
             table_management: Default::default(),
             rest: Default::default(),
@@ -1148,5 +1297,121 @@ mod tests {
         assert_eq!(stats.row_count, 5);
         assert!(stats.snapshot_id > 0);
         assert!(!writer.has_catalog_integration());
+    }
+    #[test]
+    fn test_warehouse_prefix_after_bucket_strips_scheme_and_bucket() {
+        // Bucket-only path: no prefix
+        assert_eq!(
+            IcebergWriter::warehouse_prefix_after_bucket("s3://my-bucket", "s3://my-bucket"),
+            None
+        );
+        // Trailing slash normalizes to None
+        assert_eq!(
+            IcebergWriter::warehouse_prefix_after_bucket("s3://my-bucket/", "s3://my-bucket/"),
+            None
+        );
+        // Single-segment prefix
+        assert_eq!(
+            IcebergWriter::warehouse_prefix_after_bucket("s3://", "s3://my-bucket/warehouse"),
+            Some("warehouse".to_string())
+        );
+        // Multi-segment prefix preserved
+        assert_eq!(
+            IcebergWriter::warehouse_prefix_after_bucket("gs://", "gs://bucket/warehouse/prod"),
+            Some("warehouse/prod".to_string())
+        );
+        // Wrong scheme returns None
+        assert_eq!(
+            IcebergWriter::warehouse_prefix_after_bucket("s3://", "gs://bucket/warehouse"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_parse_azure_container_both_url_forms() {
+        // Simple form: az://container/path
+        assert_eq!(
+            IcebergWriter::parse_azure_container("az://my-container/warehouse"),
+            Some("my-container".to_string())
+        );
+        // Container-only (no subpath)
+        assert_eq!(
+            IcebergWriter::parse_azure_container("az://my-container"),
+            Some("my-container".to_string())
+        );
+        // Hadoop ABFS form must extract the container BEFORE the `@`,
+        // not the whole `container@account.dfs.core.windows.net` segment.
+        assert_eq!(
+            IcebergWriter::parse_azure_container(
+                "abfs://container@account.dfs.core.windows.net/path"
+            ),
+            Some("container".to_string())
+        );
+        // ABFS with multi-segment path
+        assert_eq!(
+            IcebergWriter::parse_azure_container("abfs://events@prodacct/warehouse/raw"),
+            Some("events".to_string())
+        );
+        // Not an azure scheme
+        assert_eq!(
+            IcebergWriter::parse_azure_container("s3://bucket/path"),
+            None
+        );
+        // Empty container after `@`
+        assert_eq!(
+            IcebergWriter::parse_azure_container("az://@account/path"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_warehouse_prefix_after_azure_container_only_subpath() {
+        // No subpath past container
+        assert_eq!(
+            IcebergWriter::warehouse_prefix_after_azure_container("az://container"),
+            None
+        );
+        // Simple form subpath
+        assert_eq!(
+            IcebergWriter::warehouse_prefix_after_azure_container("az://container/warehouse"),
+            Some("warehouse".to_string())
+        );
+        // ABFS form: prefix is the part AFTER the first `/`, not affected by `@account`
+        assert_eq!(
+            IcebergWriter::warehouse_prefix_after_azure_container(
+                "abfs://container@account.dfs.core.windows.net/warehouse/raw"
+            ),
+            Some("warehouse/raw".to_string())
+        );
+        // Wrong scheme
+        assert_eq!(
+            IcebergWriter::warehouse_prefix_after_azure_container("gs://bucket/warehouse"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_file_path_has_no_prefix_for_local() {
+        // Local filesystem store roots at the warehouse path itself, so the
+        // generated path must NOT carry an in-bucket prefix.
+        let temp_dir = TempDir::new().unwrap();
+        let config = create_test_config(temp_dir.path().to_str().unwrap());
+        let writer = IcebergWriter::new(config).await.unwrap();
+
+        let partition_info = PartitionInfo {
+            topic: "test".to_string(),
+            kafka_partition: 0,
+            event_timestamp_ms: chrono::Utc::now().timestamp_millis(),
+            min_offset: 100,
+            max_offset: 200,
+            min_lsn: 1,
+            max_lsn: 2,
+        };
+        let path = writer.generate_file_path(&partition_info);
+        assert!(
+            path.starts_with("data/test_db/"),
+            "local store path should NOT have a warehouse prefix, got: {path}"
+        );
+        assert_eq!(writer.warehouse_prefix, None);
     }
 }
