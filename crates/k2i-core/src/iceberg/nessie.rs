@@ -115,7 +115,11 @@ impl NessieCatalogClient {
             timeout,
             max_retries: config.catalog_manager.max_retries,
             credential_type: config.rest.credential_type.clone(),
-            bearer_token: config.rest.credential.clone(),
+            bearer_token: config
+                .rest
+                .credential
+                .as_ref()
+                .map(|s| s.expose().to_string()),
             warehouse_path: config.warehouse_path.clone(),
             default_reference: default_ref.clone(),
             api_version,

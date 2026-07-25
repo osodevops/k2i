@@ -267,12 +267,12 @@ impl IcebergWriter {
             builder = builder.with_region(region);
         }
 
-        if let Some(ref access_key) = config.aws_access_key_id {
-            builder = builder.with_access_key_id(access_key);
+        if let Some(access_key) = &config.aws_access_key_id {
+            builder = builder.with_access_key_id(access_key.expose());
         }
 
-        if let Some(ref secret_key) = config.aws_secret_access_key {
-            builder = builder.with_secret_access_key(secret_key);
+        if let Some(secret_key) = &config.aws_secret_access_key {
+            builder = builder.with_secret_access_key(secret_key.expose());
         }
 
         if let Some(ref endpoint) = config.s3_endpoint {

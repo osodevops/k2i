@@ -1,5 +1,31 @@
 # K2I Example Configuration
 # Kafka to Iceberg streaming ingestion
+#
+# Configuration is loaded from this file and can be overridden by:
+#   - Secret file refs: `{ file = "path" }` inline tables (Kubernetes projected volumes)
+#   - `K2I_*` environment variables: override any field at runtime
+#
+# Override precedence (highest to lowest):
+#   1. K2I_* environment variables
+#   2. Inline TOML values (including `{ file = ... }` refs)
+#
+# Secret file refs — read secret contents from files at startup:
+#   [kafka.security]
+#   sasl_password = { file = "/etc/secrets/k2i/kafka-password" }
+#
+#   [iceberg]
+#   aws_access_key_id = { file = "/etc/secrets/k2i/aws-key" }
+#   aws_secret_access_key = { file = "/etc/secrets/k2i/aws-secret" }
+#
+# Environment variable overrides (all K2I_* prefixed):
+#   export K2I_KAFKA_TOPIC=my-topic
+#   export K2I_KAFKA_SECURITY_SASL_PASSWORD=hunter2
+#   export K2I_ICEBERG_WAREHOUSE_PATH=s3://prod-bucket/warehouse
+#   export K2I_ICEBERG_REST_CREDENTIAL=my-bearer-token
+#
+# Invalid numeric/enum env values are rejected with a warning; unrecognized
+# K2I_* variables are also warned about. See docs/kubernetes.md for a full
+# deployment guide.
 
 [kafka]
 bootstrap_servers = ["localhost:9092"]
@@ -32,6 +58,14 @@ type = "raw"
 # sasl_mechanism = "SCRAM-SHA-256"
 # sasl_username = "user"
 # sasl_password = "password"
+#
+# Or load secrets from files (Kubernetes projected volumes):
+# sasl_username = { file = "/etc/secrets/k2i/kafka-username" }
+# sasl_password = { file = "/etc/secrets/k2i/kafka-password" }
+#
+# Or set via environment variables:
+# K2I_KAFKA_SECURITY_SASL_USERNAME=user
+# K2I_KAFKA_SECURITY_SASL_PASSWORD=hunter2
 
 [schema_evolution]
 mode = "auto-additive"
@@ -48,11 +82,27 @@ compression = "snappy"
 
 # REST catalog configuration
 rest_uri = "http://localhost:8181"
+#
+# REST catalog credential (bearer token or OAuth2), under [iceberg.rest]:
+# [iceberg.rest]
+# credential = "my-bearer-token"
+# credential = { file = "/etc/secrets/k2i/rest-credential" }  # K8s projected volume
+#
+# Or via environment variable:
+# K2I_ICEBERG_REST_CREDENTIAL=my-bearer-token
 
 # AWS configuration (for S3 storage)
 # aws_region = "us-east-1"
-# aws_access_key_id = "${AWS_ACCESS_KEY_ID}"
-# aws_secret_access_key = "${AWS_SECRET_ACCESS_KEY}"
+# aws_access_key_id = "AKIA..."
+# aws_secret_access_key = "..."
+#
+# Or load from files (Kubernetes projected volumes):
+# aws_access_key_id = { file = "/etc/secrets/k2i/aws-key" }
+# aws_secret_access_key = { file = "/etc/secrets/k2i/aws-secret" }
+#
+# Or set via environment variables:
+# K2I_ICEBERG_AWS_ACCESS_KEY_ID=AKIA...
+# K2I_ICEBERG_AWS_SECRET_ACCESS_KEY=...
 # s3_endpoint = "http://localhost:9000"  # For MinIO
 
 # Partition specification

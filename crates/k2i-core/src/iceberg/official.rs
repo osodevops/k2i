@@ -776,15 +776,15 @@ fn apply_rest_auth_props(
             let token = config.rest.credential.as_ref().ok_or_else(|| {
                 Error::Config("REST bearer auth requires iceberg.rest.credential".into())
             })?;
-            props.insert("token".to_string(), token.clone());
+            props.insert("token".to_string(), token.expose().to_string());
         }
         CredentialType::OAuth2 => {
             let client_secret = config.rest.oauth2_client_secret.as_ref().ok_or_else(|| {
                 Error::Config("REST OAuth2 requires iceberg.rest.oauth2_client_secret".into())
             })?;
             let credential = match &config.rest.oauth2_client_id {
-                Some(client_id) => format!("{}:{}", client_id, client_secret),
-                None => client_secret.clone(),
+                Some(client_id) => format!("{}:{}", client_id.expose(), client_secret.expose()),
+                None => client_secret.expose().to_string(),
             };
             props.insert("credential".to_string(), credential);
             if let Some(endpoint) = &config.rest.oauth2_token_endpoint {
@@ -804,10 +804,16 @@ fn apply_file_io_props(config: &IcebergConfig, props: &mut HashMap<String, Strin
         props.insert("s3.endpoint".to_string(), endpoint.clone());
     }
     if let Some(access_key) = &config.aws_access_key_id {
-        props.insert("s3.access-key-id".to_string(), access_key.clone());
+        props.insert(
+            "s3.access-key-id".to_string(),
+            access_key.expose().to_string(),
+        );
     }
     if let Some(secret_key) = &config.aws_secret_access_key {
-        props.insert("s3.secret-access-key".to_string(), secret_key.clone());
+        props.insert(
+            "s3.secret-access-key".to_string(),
+            secret_key.expose().to_string(),
+        );
     }
     if let Some(region) = &config.aws_region {
         props.insert("s3.region".to_string(), region.clone());

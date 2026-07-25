@@ -131,8 +131,8 @@ impl GlueCatalogClient {
         {
             debug!("Using explicit AWS credentials");
             let credentials = aws_credential_types::Credentials::new(
-                access_key,
-                secret_key,
+                access_key.expose(),
+                secret_key.expose(),
                 None, // session token
                 None, // expiry
                 "k2i-explicit-credentials",
