@@ -28,9 +28,20 @@ formula = "k2i"
 # Publish jobs to run (updates homebrew tap automatically)
 publish-jobs = ["homebrew"]
 
-# System dependencies required for building
+# System dependencies required for building.
+#
+# rdkafka-sys bundles librdkafka, which is compiled from source and linked
+# statically. librdkafka enables OAUTHBEARER OIDC, whose rdkafka_conf.c does
+# `#ifdef WITH_OAUTHBEARER_OIDC / #include <curl/curl.h>`, so libcurl headers
+# are mandatory on Linux. macOS gets curl from the SDK, which is why only the
+# Linux target needs it spelled out here.
+#
+# Keep this list in sync with the apt installs in .github/workflows/*.yml —
+# scripts/check-workflow-deps.sh enforces that.
 [dist.dependencies.apt]
 cmake = { version = "*", targets = ["x86_64-unknown-linux-gnu"] }
+libcurl4-openssl-dev = { version = "*", targets = ["x86_64-unknown-linux-gnu"] }
+libsasl2-dev = { version = "*", targets = ["x86_64-unknown-linux-gnu"] }
 libssl-dev = { version = "*", targets = ["x86_64-unknown-linux-gnu"] }
 pkg-config = { version = "*", targets = ["x86_64-unknown-linux-gnu"] }
 

@@ -39,10 +39,27 @@ while IFS= read -r workflow; do
   done < <(grep 'apt-get install' "${workflow}")
 done < <(find "${WORKFLOW_DIR}" -name '*.yml' -o -name '*.yaml' | sort)
 
+# cargo-dist builds the release binaries in a job it generates itself, installing
+# the apt packages listed in dist-workspace.toml rather than any step written in
+# the workflow. That list drifted independently of the workflows and broke the
+# Linux release artifact after the workflows themselves were already fixed.
+readonly DIST_CONFIG="${ROOT_DIR}/dist-workspace.toml"
+
+if [[ -f "${DIST_CONFIG}" ]] && grep -q '\[dist.dependencies.apt\]' "${DIST_CONFIG}"; then
+  apt_section="$(awk '/^\[dist\.dependencies\.apt\]/{flag=1;next}/^\[/{flag=0}flag' "${DIST_CONFIG}")"
+  for package in "${required_packages[@]}"; do
+    if ! grep -q "^${package} " <<<"${apt_section}"; then
+      echo "error: dist-workspace.toml [dist.dependencies.apt] omits '${package}'"
+      failures=$((failures + 1))
+    fi
+  done
+fi
+
 if [[ "${failures}" -gt 0 ]]; then
   echo
-  echo "Every workflow job that builds the workspace must install: ${required_packages[*]}"
+  echo "Every job that builds the workspace must install: ${required_packages[*]}"
+  echo "That means .github/workflows/*.yml apt-get lines AND dist-workspace.toml."
   exit 1
 fi
 
-echo "ok: all workflow dependency installs are consistent"
+echo "ok: workflow and cargo-dist dependency installs are consistent"
