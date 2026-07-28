@@ -53,6 +53,12 @@ Run the local Iceberg load profile with 100,000 rows:
 K2I_E2E_LOAD_MESSAGES=100000 scripts/e2e-docker-iceberg-load.sh
 ```
 
+Validate a published release image, rather than a local build:
+
+```bash
+scripts/e2e-docker-released.sh v0.3.0
+```
+
 ## What K2I Does
 
 | Capability | Current behavior |

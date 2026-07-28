@@ -1,0 +1,13 @@
+# Overlay that runs the e2e stack against a published GHCR image instead of a
+# locally built one, so a release can be validated as the artifact users pull.
+#
+#   docker compose -p k2i-e2e-released \
+#     -f docker/e2e/compose.iceberg.yml \
+#     -f docker/e2e/compose.published-image.yml \
+#     up --abort-on-container-exit --exit-code-from e2e-runner e2e-runner
+#
+# Override the tag with K2I_RELEASE_IMAGE.
+services:
+  k2i:
+    image: ${K2I_RELEASE_IMAGE:-ghcr.io/osodevops/k2i:latest}
+    build: !reset null
