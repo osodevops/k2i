@@ -255,18 +255,31 @@ Use `manual` when an operator or deployment pipeline owns table schema changes. 
 | Option | Type | Required | Default | Description |
 |--------|------|----------|---------|-------------|
 | `aws_region` | String | No | - | AWS region for S3 |
-| `aws_access_key_id` | String | No | - | AWS access key ID |
-| `aws_secret_access_key` | String | No | - | AWS secret access key |
+| `aws_access_key_id` | Secret | No | - | AWS access key ID; omit to use the default credential chain |
+| `aws_secret_access_key` | Secret | No | - | AWS secret access key; omit to use the default credential chain |
 | `s3_endpoint` | String | No | - | Custom S3 endpoint (for MinIO, LocalStack) |
+| `gcs_bucket_name` | String | No | parsed from `warehouse_path` | Overrides the GCS bucket |
+| `gcs_service_account_path` | String | No | - | Service account key file; omit to use Application Default Credentials |
+| `azure_storage_account_name` | String | Yes (Azure) | - | Azure storage account; cannot be derived from `warehouse_path` |
+| `azure_container_name` | String | No | parsed from `warehouse_path` | Overrides the Azure container |
+| `azure_access_key` | Secret | No | - | Azure storage key; omit to use `DefaultAzureCredential` |
+
+Fields marked `Secret` accept either a plain string or a `{ file = "path" }`
+table. See [Injecting Secrets](#injecting-secrets).
 
 #### Warehouse Path Formats
 
-| Storage | Format | Current writer status |
-|---------|--------|-----------------------|
-| AWS S3 / S3-compatible | `s3://bucket-name/path/` | Supported path; validate credentials and endpoint in your environment |
-| Local filesystem | `file:///absolute/path/` | Supported for local development and tests |
-| Google Cloud Storage | `gs://bucket-name/path/` | Declared in configuration, but writer creation still needs backend wiring |
-| Azure Blob Storage | `az://container/path/` | Declared in configuration, but writer creation still needs backend wiring |
+| Storage | Format | Credential fall-through when keys are omitted |
+|---------|--------|-----------------------------------------------|
+| AWS S3 / S3-compatible | `s3://bucket-name/path/` | Env vars → IMDS (EC2 instance profiles) → IRSA (EKS) |
+| Local filesystem | `file:///absolute/path/` | n/a — used for local development and tests |
+| Google Cloud Storage | `gs://bucket-name/path/` | Application Default Credentials (GKE Workload Identity, `GOOGLE_APPLICATION_CREDENTIALS`, gcloud) |
+| Azure Blob Storage | `az://container/path/` or `abfs://container@account.dfs.core.windows.net/path/` | `DefaultAzureCredential` (env → Managed Identity on AKS → Azure CLI) |
+
+For cloud backends the object store is rooted at the bucket or container, and
+the remainder of `warehouse_path` becomes an in-bucket prefix. A warehouse of
+`s3://bucket/warehouse` writes data files to `s3://bucket/warehouse/data/...`,
+matching the location the catalog records.
 
 ### [[iceberg.partition_spec]]
 
@@ -448,19 +461,43 @@ The v1 protocol exposes `Health`, `ListTables`, `GetTableSchema`, `ScanTableBegi
 
 ---
 
-## Environment Variable Substitution
+## Injecting Secrets
 
-Configuration values can reference environment variables:
+Values in the TOML file are **not** shell-interpolated: writing
+`sasl_password = "${KAFKA_PASSWORD}"` authenticates with the literal string
+`${KAFKA_PASSWORD}`. Use one of the two supported mechanisms instead.
+
+**1. Read the value from a file** — for Kubernetes projected `Secret` volumes
+and the Secrets Store CSI Driver. Credential fields accept a `{ file = "..." }`
+table in place of a string; the file contents are read at startup and trimmed.
 
 ```toml
 [kafka.security]
-sasl_username = "${KAFKA_USERNAME}"
-sasl_password = "${KAFKA_PASSWORD}"
+sasl_username = { file = "/etc/secrets/k2i/kafka-username" }
+sasl_password = { file = "/etc/secrets/k2i/kafka-password" }
 
 [iceberg]
-aws_access_key_id = "${AWS_ACCESS_KEY_ID}"
-aws_secret_access_key = "${AWS_SECRET_ACCESS_KEY}"
+aws_access_key_id = { file = "/etc/secrets/k2i/aws-access-key-id" }
+aws_secret_access_key = { file = "/etc/secrets/k2i/aws-secret-access-key" }
 ```
+
+**2. Set a `K2I_*` environment variable** — these take precedence over the TOML
+value, and suit `secretKeyRef` injection.
+
+```bash
+export K2I_KAFKA_SECURITY_SASL_USERNAME=svc-account
+export K2I_KAFKA_SECURITY_SASL_PASSWORD=...
+export K2I_ICEBERG_AWS_ACCESS_KEY_ID=AKIA...
+export K2I_ICEBERG_AWS_SECRET_ACCESS_KEY=...
+```
+
+Credential fields are redacted in both `Debug` output and serde serialization,
+so neither a log line nor a configuration dump can leak them. Prefer file refs
+over env vars where the threat model includes other processes reading
+`/proc/<pid>/environ`.
+
+See [Kubernetes deployment](./kubernetes.md) for the full variable table and the
+manifest patterns for both approaches.
 
 ---
 

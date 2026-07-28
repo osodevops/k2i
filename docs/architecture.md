@@ -169,7 +169,7 @@ See [Iceberg REST Catalog](./iceberg-rest-catalog.md).
 - Startup recovery state is computed, but Kafka seeking/deduplication and startup orphan cleanup need further wiring.
 - Kafka commits are async in the current helper.
 - Transaction-log entries are flushed, but not every entry is fsynced individually.
-- GCS and Azure object-store configuration is declared, but writer creation is not complete for those backends.
+- S3, GCS, and Azure object stores are wired end to end. S3 is covered by a container-backed round-trip test (MinIO); GCS and Azure are covered only at the configuration and store-construction level, so validate their credentials in your own environment before rollout.
 - Maintenance commands and task implementations exist; scheduler wiring should be reviewed for each deployment.
 
 See [Production Readiness](./production-readiness.md).

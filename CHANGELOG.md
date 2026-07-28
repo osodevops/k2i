@@ -7,16 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Implemented `create_gcs_store()` via `object_store::gcp::GoogleCloudStorageBuilder`, falling through to Application Default Credentials (Workload Identity on GKE) when `gcs_service_account_path` is unset.
+- Implemented `create_azure_store()` via `object_store::azure::MicrosoftAzureBuilder`, falling through to `DefaultAzureCredential` (Managed Identity on AKS) when `azure_access_key` is unset.
+- Documented that omitting `aws_access_key_id`/`aws_secret_access_key` activates the `AmazonS3Builder` default credential chain (env vars → IMDS → IRSA), unblocking EKS with IRSA and EC2 instance profiles without explicit config.
+- Added `gcs_bucket_name`, `gcs_service_account_path`, `azure_container_name`, `azure_storage_account_name`, and `azure_access_key` fields to `IcebergConfig` for credential overrides and the Azure-required account name.
+
+### Security
+
+- `Secret` now redacts in `serde` serialization as well as `Debug`, emitting `REDACTED` in place of the value. `Config` derives `Serialize`, so previously any code that dumped or echoed the configuration would have emitted credentials in the clear. This follows the `secrecy` crate's convention of not implementing `Serialize` for secret-wrapped strings, so that emitting one must be a conscious act. The trade-off is deliberate and documented: a serialized `Config` no longer round-trips, since reading it back yields the literal `REDACTED` marker.
+
 ### Changed
 
+- `Config::validate` now rejects cloud warehouse settings that cannot be satisfied, rather than deferring the failure to the first flush: `azure_storage_account_name` is required for `az://` and `abfs://` paths, and `s3://`/`gs://` paths must name a bucket. A long-running ingest previously reported healthy and only failed minutes later, on its first write.
+- Warehouse-path parsing (bucket, Azure container, in-bucket prefix) is now defined once in `config` and shared with the Iceberg writer, so what validation accepts is exactly what the writer can build a store from.
+- Bumped the workspace version to 0.3.0 to absorb the semver-major addition of public fields on the externally-constructible `IcebergConfig` struct. The 0.x convention treats a minor bump (0.2 → 0.3) as the breaking-change boundary.
 - Upgraded the official Apache Iceberg Rust client from 0.7 to 0.10.0 and the Arrow/Parquet ecosystem from 54 to 58.
 - Removed the temporary standalone REST `update_schema` fallback now that `Transaction::update_schema()` is available in `iceberg-rust` 0.10.0.
 - Simplified `OfficialRestCommitter` by delegating all catalog operations to the official `RestCatalog` transaction APIs.
 
 ### Fixed
 
-- Avoided manual OAuth2, route resolution, and multipart namespace encoding logic previously needed for the schema-update fallback.
+- Aligned cloud object store uploads with the warehouse path recorded by the catalog/txlog. For cloud backends the store is rooted at the bucket, so `IcebergWriter` derives an in-bucket prefix from `warehouse_path` (e.g. `warehouse` for `s3://bucket/warehouse`) and applies it when addressing the store. Uploads previously landed at `s3://bucket/data/...` while the catalog recorded `s3://bucket/warehouse/data/...`, leaving every committed file unreadable. Preexisting on S3; the same handling now covers GCS and Azure. The prefix is applied **only** at upload time — paths handed to the catalog, transaction log, and read path stay warehouse-relative, since those consumers join them against `warehouse_path` themselves.
+- Azure container parsing now handles the Hadoop ABFS form `abfs://container@account.dfs.core.windows.net/path` by extracting the container before the `@`, instead of treating the whole `container@account` segment as the container.
+- `K2I_MONITORING_LOG_FORMAT` now takes effect. The tracing subscriber is configured before the full config is loaded and read the TOML value directly, so the environment override was silently ignored for all output.
+- `K2I_RPC_ENABLED` no longer treats an unrecognized value as `false`. `K2I_RPC_ENABLED=yes` previously disabled the RPC server that the TOML had enabled; unparseable values now warn and preserve the configured value.
+- Added `K2I_*` overrides for the remaining cloud object-store fields, including the Azure-required `azure_storage_account_name`, which could not previously be set by environment-only deployments.
+- The unrecognized-variable warning no longer fires for `K2I_E2E_*` and the other harness variables that share the engine's environment during end-to-end runs.
 - Aligned Parquet writer properties with the parquet 58 API (`set_max_row_group_row_count`).
+- Avoided manual OAuth2, route resolution, and multipart namespace encoding logic previously needed for the schema-update fallback.
+
+### Testing
+
+- Added container-backed S3 round-trip tests (MinIO) covering a prefixed warehouse (`s3://bucket/warehouse`), a multi-segment prefix, and a bucket-root warehouse. Each asserts that joining `warehouse_path` with the writer's reported path resolves to a real stored object, and that nothing was written to the doubled-prefix or bucket-root locations. These reproduce the warehouse-prefix defect above; they fail against the previous behaviour.
+- CI's integration-tests job now passes `--include-ignored`. Every container-backed test is marked `#[ignore = "requires Docker"]`, so the job provisioned Docker and then ran no Docker test at all — including the pre-existing Kafka integration tests.
+- The Tests workflow now also triggers on `docs/**` and `config/**`, since a test asserts that every `K2I_*` variable is documented in `docs/kubernetes.md`.
+
+### Documentation
+
+- Removed the `docs/configuration.md` claim that config values support `${VAR}` shell substitution. No such mechanism exists — following it would have authenticated with the literal string `${VAR}`. Replaced with the two real mechanisms: `{ file = "..." }` refs and `K2I_*` overrides.
+- Updated `README.md`, `docs/architecture.md`, and `docs/configuration.md`, which still described GCS and Azure as declared-but-unwired.
 
 ### Requirements
 

@@ -131,8 +131,8 @@ impl GlueCatalogClient {
         {
             debug!("Using explicit AWS credentials");
             let credentials = aws_credential_types::Credentials::new(
-                access_key,
-                secret_key,
+                access_key.expose(),
+                secret_key.expose(),
                 None, // session token
                 None, // expiry
                 "k2i-explicit-credentials",
@@ -801,6 +801,11 @@ mod tests {
             aws_access_key_id: Some("test_key".into()),
             aws_secret_access_key: Some("test_secret".into()),
             s3_endpoint: None,
+            gcs_bucket_name: None,
+            gcs_service_account_path: None,
+            azure_container_name: None,
+            azure_storage_account_name: None,
+            azure_access_key: None,
             catalog_manager: Default::default(),
             table_management: Default::default(),
             rest: Default::default(),

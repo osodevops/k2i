@@ -361,13 +361,19 @@ async fn main() {
 async fn run_cli() -> ExitCode {
     let cli = Cli::parse();
 
-    // Try to load config for log format settings (optional - falls back to JSON)
-    let log_format = cli
-        .config
-        .as_ref()
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .and_then(|content| toml::from_str::<Config>(&content).ok())
-        .map(|config| config.monitoring.log_format)
+    // Try to load config for log format settings (optional - falls back to JSON).
+    // `K2I_MONITORING_LOG_FORMAT` wins over the TOML value here for the same
+    // reason it does in `Config::apply_env_overrides`; checking it directly means
+    // the override also applies when no config file is given, and before the
+    // subscriber exists to report a bad value.
+    let log_format = LogFormat::from_env()
+        .or_else(|| {
+            cli.config
+                .as_ref()
+                .and_then(|path| std::fs::read_to_string(path).ok())
+                .and_then(|content| toml::from_str::<Config>(&content).ok())
+                .map(|config| config.monitoring.log_format)
+        })
         .unwrap_or(LogFormat::Json);
 
     // Initialize logging
@@ -513,8 +519,5 @@ async fn execute_command(cli: Cli) -> Result<()> {
 
 fn load_config(path: &Option<PathBuf>) -> Result<Config> {
     let path = path.clone().unwrap_or_else(|| PathBuf::from("config.toml"));
-
-    let content = std::fs::read_to_string(&path)?;
-    let config: Config = toml::from_str(&content)?;
-    Ok(config)
+    Ok(Config::from_file(&path)?)
 }

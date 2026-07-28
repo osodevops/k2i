@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 license = "Apache-2.0"
 authors = ["OSO DevOps"]
@@ -119,6 +119,7 @@ testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = [
   "kafka",
   "localstack",
+  "minio",
 ] }
 tempfile = "3"
 tokio-test = "0.4"

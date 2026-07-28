@@ -662,3 +662,253 @@ mod end_to_end {
         assert!(!entries.is_empty());
     }
 }
+
+/// End-to-end verification that data files land where the Iceberg catalog says
+/// they do, against a real S3 implementation (MinIO).
+///
+/// For cloud backends the object store is rooted at the *bucket*, while the
+/// catalog, the transaction log, and the read path all locate a data file by
+/// joining `warehouse_path` with the writer's reported path. A warehouse with
+/// an in-bucket prefix (`s3://bucket/warehouse`) is therefore the case where
+/// those two views can silently disagree — and a disagreement means every
+/// committed file is unreadable while the pipeline reports success.
+///
+/// These tests pin the contract: the reported path is warehouse-relative, and
+/// `warehouse_path` + reported path resolves to a real object.
+mod s3_object_store_integration {
+    use k2i_core::config::{
+        CatalogManagerConfig, CatalogType, GlueCatalogConfig, IcebergConfig, ObjectStoreConfig,
+        ParquetCompression, RestCatalogConfig, TableManagementConfig,
+    };
+    use k2i_core::iceberg::IcebergWriter;
+    use object_store::aws::AmazonS3Builder;
+    use object_store::path::Path as ObjectPath;
+    use object_store::ObjectStore;
+    use testcontainers::core::{ContainerPort, WaitFor};
+    use testcontainers::runners::AsyncRunner;
+    use testcontainers::{GenericImage, ImageExt};
+
+    use arrow::array::{Int32Array, Int64Array, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use std::sync::Arc;
+
+    const BUCKET: &str = "k2i-test-bucket";
+    const ACCESS_KEY: &str = "minioadmin";
+    const SECRET_KEY: &str = "minioadmin";
+
+    /// MinIO serves each top-level directory under its data dir as a bucket.
+    /// Seeding a file inside `/data/<bucket>/` therefore provisions the bucket
+    /// before startup, avoiding a dependency on an S3 admin client purely to
+    /// issue a CreateBucket call. The image entrypoint prefixes `minio` to the
+    /// command, so the command cannot be used to run a shell.
+    fn minio_image() -> testcontainers::ContainerRequest<GenericImage> {
+        GenericImage::new("minio/minio", "RELEASE.2022-02-07T08-17-33Z")
+            .with_wait_for(WaitFor::message_on_stdout("API:"))
+            .with_exposed_port(ContainerPort::Tcp(9000))
+            .with_env_var("MINIO_CONSOLE_ADDRESS", ":9001")
+            .with_env_var("MINIO_ROOT_USER", ACCESS_KEY)
+            .with_env_var("MINIO_ROOT_PASSWORD", SECRET_KEY)
+            .with_copy_to(format!("/data/{BUCKET}/.keep"), Vec::<u8>::new())
+            .with_cmd(vec!["server".to_string(), "/data".to_string()])
+    }
+
+    fn s3_config(warehouse_path: &str, endpoint: &str) -> IcebergConfig {
+        IcebergConfig {
+            catalog_type: CatalogType::Rest,
+            warehouse_path: warehouse_path.to_string(),
+            database_name: "test_db".to_string(),
+            table_name: "test_table".to_string(),
+            target_file_size_mb: 128,
+            compression: ParquetCompression::Snappy,
+            partition_spec: vec![],
+            rest_uri: None,
+            hive_metastore_uri: None,
+            aws_region: Some("us-east-1".to_string()),
+            aws_access_key_id: Some(ACCESS_KEY.into()),
+            aws_secret_access_key: Some(SECRET_KEY.into()),
+            s3_endpoint: Some(endpoint.to_string()),
+            gcs_bucket_name: None,
+            gcs_service_account_path: None,
+            azure_container_name: None,
+            azure_storage_account_name: None,
+            azure_access_key: None,
+            catalog_manager: CatalogManagerConfig::default(),
+            table_management: TableManagementConfig::default(),
+            rest: RestCatalogConfig::default(),
+            glue: GlueCatalogConfig::default(),
+            nessie: None,
+            sql_catalog: None,
+            object_store: ObjectStoreConfig::default(),
+        }
+    }
+
+    fn test_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, true),
+            Field::new("partition", DataType::Int32, false),
+            Field::new("offset", DataType::Int64, false),
+            Field::new("timestamp", DataType::Int64, false),
+        ]));
+        let now = chrono::Utc::now().timestamp_millis();
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2, 3])),
+                Arc::new(StringArray::from(vec!["a", "b", "c"])),
+                Arc::new(Int32Array::from(vec![0, 0, 0])),
+                Arc::new(Int64Array::from(vec![100, 101, 102])),
+                Arc::new(Int64Array::from(vec![now, now, now])),
+            ],
+        )
+        .expect("failed to build test batch")
+    }
+
+    /// A store rooted at the bucket, matching how an external reader (Spark,
+    /// DuckDB, Trino) would resolve the URI the catalog recorded.
+    fn bucket_rooted_store(endpoint: &str) -> impl ObjectStore {
+        AmazonS3Builder::new()
+            .with_bucket_name(BUCKET)
+            .with_region("us-east-1")
+            .with_access_key_id(ACCESS_KEY)
+            .with_secret_access_key(SECRET_KEY)
+            .with_endpoint(endpoint)
+            .with_allow_http(true)
+            .build()
+            .expect("failed to build verification store")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker"]
+    async fn test_s3_prefixed_warehouse_file_lands_where_catalog_points() {
+        let container = minio_image().start().await.expect("failed to start MinIO");
+        let port = container
+            .get_host_port_ipv4(9000)
+            .await
+            .expect("failed to get MinIO port");
+        let endpoint = format!("http://127.0.0.1:{port}");
+
+        // The interesting case: a warehouse with an in-bucket prefix.
+        let warehouse = format!("s3://{BUCKET}/warehouse");
+        let writer = IcebergWriter::new(s3_config(&warehouse, &endpoint))
+            .await
+            .expect("failed to build S3 writer");
+
+        let stats = writer
+            .write_batch(test_batch(), 102)
+            .await
+            .expect("write_batch against MinIO should succeed");
+
+        // 1. The reported path is warehouse-relative — it must NOT already
+        //    contain the in-bucket prefix, or consumers that join it against
+        //    `warehouse_path` would double it.
+        assert!(
+            stats.file_path.starts_with("data/test_db/test_table/"),
+            "reported path should be warehouse-relative, got: {}",
+            stats.file_path
+        );
+        assert!(
+            !stats.file_path.starts_with("warehouse/"),
+            "reported path must not carry the in-bucket prefix, got: {}",
+            stats.file_path
+        );
+
+        let store = bucket_rooted_store(&endpoint);
+
+        // 2. Joining `warehouse_path` with the reported path — exactly what the
+        //    catalog records and what an external reader resolves — must land on
+        //    a real object of the right size.
+        let expected_key = ObjectPath::from(format!("warehouse/{}", stats.file_path));
+        let meta = store.head(&expected_key).await.unwrap_or_else(|e| {
+            panic!(
+                "catalog URI {}/{} does not resolve to a stored object: {e}",
+                warehouse, stats.file_path
+            )
+        });
+        assert_eq!(
+            meta.size as usize, stats.file_size_bytes,
+            "stored object size should match the reported write size"
+        );
+
+        // 3. Nothing was written to the double-prefixed location.
+        let doubled = ObjectPath::from(format!("warehouse/warehouse/{}", stats.file_path));
+        assert!(
+            store.head(&doubled).await.is_err(),
+            "object must not be written under a doubled warehouse prefix"
+        );
+
+        // 4. Nothing was written at the bucket root either, which is where
+        //    uploads landed before the prefix was applied at all.
+        let bucket_root = ObjectPath::from(stats.file_path.clone());
+        assert!(
+            store.head(&bucket_root).await.is_err(),
+            "object must not be written at the bucket root, bypassing the warehouse prefix"
+        );
+    }
+
+    /// A bucket-root warehouse has no prefix to apply, so the reported path and
+    /// the storage key must coincide.
+    #[tokio::test]
+    #[ignore = "requires Docker"]
+    async fn test_s3_bucket_root_warehouse_writes_at_bucket_root() {
+        let container = minio_image().start().await.expect("failed to start MinIO");
+        let port = container
+            .get_host_port_ipv4(9000)
+            .await
+            .expect("failed to get MinIO port");
+        let endpoint = format!("http://127.0.0.1:{port}");
+
+        let warehouse = format!("s3://{BUCKET}");
+        let writer = IcebergWriter::new(s3_config(&warehouse, &endpoint))
+            .await
+            .expect("failed to build S3 writer");
+
+        let stats = writer
+            .write_batch(test_batch(), 102)
+            .await
+            .expect("write_batch against MinIO should succeed");
+
+        let store = bucket_rooted_store(&endpoint);
+        let key = ObjectPath::from(stats.file_path.clone());
+        let meta = store.head(&key).await.unwrap_or_else(|e| {
+            panic!(
+                "object {} should exist at bucket root: {e}",
+                stats.file_path
+            )
+        });
+        assert_eq!(meta.size as usize, stats.file_size_bytes);
+    }
+
+    /// A multi-segment prefix (`s3://bucket/warehouse/prod`) must be preserved
+    /// in full, not collapsed to its first segment.
+    #[tokio::test]
+    #[ignore = "requires Docker"]
+    async fn test_s3_multi_segment_warehouse_prefix_is_preserved() {
+        let container = minio_image().start().await.expect("failed to start MinIO");
+        let port = container
+            .get_host_port_ipv4(9000)
+            .await
+            .expect("failed to get MinIO port");
+        let endpoint = format!("http://127.0.0.1:{port}");
+
+        let warehouse = format!("s3://{BUCKET}/warehouse/prod");
+        let writer = IcebergWriter::new(s3_config(&warehouse, &endpoint))
+            .await
+            .expect("failed to build S3 writer");
+
+        let stats = writer
+            .write_batch(test_batch(), 102)
+            .await
+            .expect("write_batch against MinIO should succeed");
+
+        let store = bucket_rooted_store(&endpoint);
+        let expected_key = ObjectPath::from(format!("warehouse/prod/{}", stats.file_path));
+        store.head(&expected_key).await.unwrap_or_else(|e| {
+            panic!(
+                "catalog URI {}/{} does not resolve to a stored object: {e}",
+                warehouse, stats.file_path
+            )
+        });
+    }
+}
