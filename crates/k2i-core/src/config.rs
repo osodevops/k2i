@@ -18,6 +18,13 @@ use std::path::PathBuf;
 ///
 /// File contents are trimmed. Read the value explicitly with
 /// [`Secret::expose`] or via `Deref` (`&*secret`).
+///
+/// Note that `Debug` is the only redacted output. [`Serialize`] is
+/// `transparent` and emits the plaintext, so that a `Config` round-trips
+/// faithfully. Nothing currently serializes `Config`; if that changes — a
+/// `config dump` subcommand, an RPC response echoing settings — the secret
+/// would go out in the clear. Redact at that call site, or give `Secret` a
+/// redacting `Serialize` and accept that the output no longer round-trips.
 #[derive(Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct Secret(String);
@@ -957,6 +964,27 @@ pub enum LogFormat {
     Text,
 }
 
+impl LogFormat {
+    /// Parse a `K2I_MONITORING_LOG_FORMAT` value, case-insensitively.
+    ///
+    /// Returns `None` for unrecognized values so callers can warn and fall back.
+    pub fn parse_env_value(value: &str) -> Option<Self> {
+        match value.to_lowercase().as_str() {
+            "json" => Some(Self::Json),
+            "text" => Some(Self::Text),
+            _ => None,
+        }
+    }
+
+    /// Read the log format from `K2I_MONITORING_LOG_FORMAT`, if set and valid.
+    ///
+    /// Used to configure the tracing subscriber before the full config is
+    /// loaded, so the env override applies to startup logging too.
+    pub fn from_env() -> Option<Self> {
+        Self::parse_env_value(&std::env::var("K2I_MONITORING_LOG_FORMAT").ok()?)
+    }
+}
+
 // Default value functions
 fn default_batch_size() -> usize {
     1000
@@ -1077,6 +1105,13 @@ fn default_auto_create() -> bool {
     true
 }
 
+/// `K2I_*` prefixes owned by tooling rather than by [`Config`].
+///
+/// These are consumed by the end-to-end test harness (`k2i-e2e-runner`) and its
+/// helper subprocesses, which run with the same environment as the engine. They
+/// are not config fields, so the typo warning below must not flag them.
+const RESERVED_ENV_PREFIXES: &[&str] = &["K2I_E2E_", "K2I_PARQUET_", "K2I_ICEBERG_METADATA_PATH"];
+
 /// Environment variables recognized by [`Config::apply_env_overrides`].
 ///
 /// Keep in sync with the `env_val(...)` calls in that method.
@@ -1101,6 +1136,10 @@ const KNOWN_ENV_VARS: &[&str] = &[
     "K2I_ICEBERG_AWS_REGION",
     "K2I_ICEBERG_AWS_ACCESS_KEY_ID",
     "K2I_ICEBERG_AWS_SECRET_ACCESS_KEY",
+    "K2I_ICEBERG_GCS_BUCKET_NAME",
+    "K2I_ICEBERG_GCS_SERVICE_ACCOUNT_PATH",
+    "K2I_ICEBERG_AZURE_STORAGE_ACCOUNT_NAME",
+    "K2I_ICEBERG_AZURE_CONTAINER_NAME",
     "K2I_ICEBERG_AZURE_ACCESS_KEY",
     "K2I_ICEBERG_S3_ENDPOINT",
     "K2I_ICEBERG_REST_URI",
@@ -1351,6 +1390,18 @@ impl Config {
         if let Some(v) = env_val("K2I_ICEBERG_AWS_SECRET_ACCESS_KEY") {
             self.iceberg.aws_secret_access_key = Some(Secret::new(v));
         }
+        if let Some(v) = env_val("K2I_ICEBERG_GCS_BUCKET_NAME") {
+            self.iceberg.gcs_bucket_name = Some(v);
+        }
+        if let Some(v) = env_val("K2I_ICEBERG_GCS_SERVICE_ACCOUNT_PATH") {
+            self.iceberg.gcs_service_account_path = Some(v);
+        }
+        if let Some(v) = env_val("K2I_ICEBERG_AZURE_STORAGE_ACCOUNT_NAME") {
+            self.iceberg.azure_storage_account_name = Some(v);
+        }
+        if let Some(v) = env_val("K2I_ICEBERG_AZURE_CONTAINER_NAME") {
+            self.iceberg.azure_container_name = Some(v);
+        }
         if let Some(v) = env_val("K2I_ICEBERG_AZURE_ACCESS_KEY") {
             self.iceberg.azure_access_key = Some(Secret::new(v));
         }
@@ -1451,16 +1502,25 @@ impl Config {
             }
         }
         if let Some(v) = env_val("K2I_MONITORING_LOG_FORMAT") {
-            match v.to_lowercase().as_str() {
-                "json" => self.monitoring.log_format = LogFormat::Json,
-                "text" => self.monitoring.log_format = LogFormat::Text,
-                _ => warn_bad_enum("K2I_MONITORING_LOG_FORMAT", &v, &["json", "text"]),
+            match LogFormat::parse_env_value(&v) {
+                Some(format) => self.monitoring.log_format = format,
+                None => warn_bad_enum("K2I_MONITORING_LOG_FORMAT", &v, &["json", "text"]),
             }
         }
 
         // --- RPC ---
         if let Some(v) = env_val("K2I_RPC_ENABLED") {
-            self.rpc.enabled = v.eq_ignore_ascii_case("true") || v == "1";
+            // Anything unrecognized keeps the TOML value rather than silently
+            // reading as `false` — `K2I_RPC_ENABLED=yes` must not disable RPC.
+            match v.to_lowercase().as_str() {
+                "true" | "1" | "yes" | "on" => self.rpc.enabled = true,
+                "false" | "0" | "no" | "off" => self.rpc.enabled = false,
+                _ => warn_bad_enum(
+                    "K2I_RPC_ENABLED",
+                    &v,
+                    &["true", "false", "1", "0", "yes", "no", "on", "off"],
+                ),
+            }
         }
         if let Some(v) = env_val("K2I_RPC_SOCKET_PATH") {
             self.rpc.socket_path = std::path::PathBuf::from(v);
@@ -1469,7 +1529,12 @@ impl Config {
         // Warn on unrecognized K2I_* variables (typo detection).
         for (key, _) in std::env::vars_os() {
             let key = key.to_string_lossy();
-            if key.starts_with("K2I_") && !KNOWN_ENV_VARS.contains(&key.as_ref()) {
+            if key.starts_with("K2I_")
+                && !KNOWN_ENV_VARS.contains(&key.as_ref())
+                && !RESERVED_ENV_PREFIXES
+                    .iter()
+                    .any(|prefix| key.starts_with(prefix))
+            {
                 tracing::warn!(var = %key, "Unrecognized K2I_* environment variable ignored");
             }
         }
@@ -2153,6 +2218,178 @@ table_name = "tbl"
         );
 
         std::env::remove_var("K2I_KAFKA_SECURITY_SASL_PASSWORD");
+    }
+
+    /// `azure_storage_account_name` is mandatory for Azure backends, so a
+    /// Kubernetes deployment configuring purely through env must be able to set
+    /// it. Same for the other cloud-store fields.
+    #[test]
+    fn test_env_override_cloud_store_fields() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("K2I_ICEBERG_GCS_BUCKET_NAME", "env-bucket");
+        std::env::set_var("K2I_ICEBERG_GCS_SERVICE_ACCOUNT_PATH", "/run/gcp/key.json");
+        std::env::set_var("K2I_ICEBERG_AZURE_STORAGE_ACCOUNT_NAME", "envacct");
+        std::env::set_var("K2I_ICEBERG_AZURE_CONTAINER_NAME", "env-container");
+        std::env::set_var("K2I_ICEBERG_AZURE_ACCESS_KEY", "env-azure-key");
+
+        let mut config = test_config();
+        config.apply_env_overrides();
+
+        assert_eq!(
+            config.iceberg.gcs_bucket_name.as_deref(),
+            Some("env-bucket")
+        );
+        assert_eq!(
+            config.iceberg.gcs_service_account_path.as_deref(),
+            Some("/run/gcp/key.json")
+        );
+        assert_eq!(
+            config.iceberg.azure_storage_account_name.as_deref(),
+            Some("envacct")
+        );
+        assert_eq!(
+            config.iceberg.azure_container_name.as_deref(),
+            Some("env-container")
+        );
+        assert_eq!(
+            config.iceberg.azure_access_key.as_deref(),
+            Some("env-azure-key")
+        );
+
+        for var in [
+            "K2I_ICEBERG_GCS_BUCKET_NAME",
+            "K2I_ICEBERG_GCS_SERVICE_ACCOUNT_PATH",
+            "K2I_ICEBERG_AZURE_STORAGE_ACCOUNT_NAME",
+            "K2I_ICEBERG_AZURE_CONTAINER_NAME",
+            "K2I_ICEBERG_AZURE_ACCESS_KEY",
+        ] {
+            std::env::remove_var(var);
+        }
+    }
+
+    /// An unparseable boolean must not read as `false` — that would silently
+    /// disable RPC for a deployment that set `K2I_RPC_ENABLED=yes`.
+    #[test]
+    fn test_env_override_rpc_enabled_booleans() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        for (value, expected) in [
+            ("true", true),
+            ("1", true),
+            ("yes", true),
+            ("ON", true),
+            ("false", false),
+            ("0", false),
+            ("no", false),
+        ] {
+            std::env::set_var("K2I_RPC_ENABLED", value);
+            let mut config = test_config();
+            config.rpc.enabled = !expected;
+            config.apply_env_overrides();
+            assert_eq!(config.rpc.enabled, expected, "K2I_RPC_ENABLED={value}");
+        }
+
+        // Garbage preserves the configured value in both directions.
+        std::env::set_var("K2I_RPC_ENABLED", "maybe");
+        for configured in [true, false] {
+            let mut config = test_config();
+            config.rpc.enabled = configured;
+            config.apply_env_overrides();
+            assert_eq!(config.rpc.enabled, configured);
+        }
+
+        std::env::remove_var("K2I_RPC_ENABLED");
+    }
+
+    #[test]
+    fn test_log_format_parse_env_value() {
+        assert_eq!(LogFormat::parse_env_value("TEXT"), Some(LogFormat::Text));
+        assert_eq!(LogFormat::parse_env_value("json"), Some(LogFormat::Json));
+        assert_eq!(LogFormat::parse_env_value("yaml"), None);
+    }
+
+    /// Values are never shell-interpolated. `docs/configuration.md` once
+    /// promised `${VAR}` substitution; following it would have authenticated
+    /// with the literal string. Pin the real behaviour so the documented
+    /// mechanisms (`{ file = ... }` and `K2I_*`) stay the only two.
+    #[test]
+    fn test_secret_values_are_not_shell_interpolated() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("SOME_KAFKA_PASSWORD", "real-secret");
+
+        let toml = r#"
+[kafka]
+bootstrap_servers = ["localhost:9092"]
+topic = "events"
+consumer_group = "k2i"
+
+[kafka.security]
+sasl_password = "${SOME_KAFKA_PASSWORD}"
+
+[iceberg]
+catalog_type = "rest"
+warehouse_path = "/tmp/warehouse"
+database_name = "db"
+table_name = "tbl"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(
+            config.kafka.security.sasl_password.as_deref(),
+            Some("${SOME_KAFKA_PASSWORD}"),
+            "`${{VAR}}` is stored literally; it is not an interpolation syntax"
+        );
+
+        std::env::remove_var("SOME_KAFKA_PASSWORD");
+    }
+
+    /// The env var table in `docs/kubernetes.md` is the deployment contract.
+    /// If a variable is added to `KNOWN_ENV_VARS` without documenting it,
+    /// operators cannot discover it — and an undocumented name silently does
+    /// nothing when mistyped.
+    #[test]
+    fn test_known_env_vars_are_documented() {
+        let docs = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/kubernetes.md"
+        ))
+        .expect("docs/kubernetes.md should be readable");
+
+        let undocumented: Vec<_> = KNOWN_ENV_VARS
+            .iter()
+            .filter(|var| !docs.contains(&format!("`{var}`")))
+            .collect();
+
+        assert!(
+            undocumented.is_empty(),
+            "these K2I_* variables are not documented in docs/kubernetes.md: {undocumented:?}"
+        );
+    }
+
+    #[test]
+    fn test_known_env_vars_have_no_duplicates() {
+        let unique: std::collections::HashSet<_> = KNOWN_ENV_VARS.iter().collect();
+        assert_eq!(unique.len(), KNOWN_ENV_VARS.len());
+    }
+
+    /// Harness variables share the engine's environment during e2e runs; they
+    /// must not be reported as typos.
+    #[test]
+    fn test_reserved_env_prefixes_cover_harness_variables() {
+        for var in [
+            "K2I_E2E_TOPIC",
+            "K2I_E2E_WAREHOUSE",
+            "K2I_PARQUET_PATHS",
+            "K2I_ICEBERG_METADATA_PATH",
+        ] {
+            assert!(
+                RESERVED_ENV_PREFIXES.iter().any(|p| var.starts_with(p)),
+                "{var} should be treated as a reserved harness variable"
+            );
+        }
+        // A genuine typo is still not reserved.
+        assert!(!RESERVED_ENV_PREFIXES
+            .iter()
+            .any(|p| "K2I_KAFKA_TOPC".starts_with(p)));
     }
 
     /// Build a minimal valid Config for override tests.

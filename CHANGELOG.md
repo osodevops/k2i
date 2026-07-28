@@ -23,10 +23,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Aligned cloud object store uploads with the warehouse path recorded by the catalog/txlog: `IcebergWriter` now derives an in-bucket prefix from `warehouse_path` (e.g. `warehouse` for `s3://bucket/warehouse`) and prepends it to every data file path, fixing a silent mismatch where uploads landed at `s3://bucket/data/...` while the catalog expected `s3://bucket/warehouse/data/...`. Preexisting on S3; now applied uniformly to GCS and Azure.
+- Aligned cloud object store uploads with the warehouse path recorded by the catalog/txlog. For cloud backends the store is rooted at the bucket, so `IcebergWriter` derives an in-bucket prefix from `warehouse_path` (e.g. `warehouse` for `s3://bucket/warehouse`) and applies it when addressing the store. Uploads previously landed at `s3://bucket/data/...` while the catalog recorded `s3://bucket/warehouse/data/...`, leaving every committed file unreadable. Preexisting on S3; the same handling now covers GCS and Azure. The prefix is applied **only** at upload time — paths handed to the catalog, transaction log, and read path stay warehouse-relative, since those consumers join them against `warehouse_path` themselves.
 - Azure container parsing now handles the Hadoop ABFS form `abfs://container@account.dfs.core.windows.net/path` by extracting the container before the `@`, instead of treating the whole `container@account` segment as the container.
+- `K2I_MONITORING_LOG_FORMAT` now takes effect. The tracing subscriber is configured before the full config is loaded and read the TOML value directly, so the environment override was silently ignored for all output.
+- `K2I_RPC_ENABLED` no longer treats an unrecognized value as `false`. `K2I_RPC_ENABLED=yes` previously disabled the RPC server that the TOML had enabled; unparseable values now warn and preserve the configured value.
+- Added `K2I_*` overrides for the remaining cloud object-store fields, including the Azure-required `azure_storage_account_name`, which could not previously be set by environment-only deployments.
+- The unrecognized-variable warning no longer fires for `K2I_E2E_*` and the other harness variables that share the engine's environment during end-to-end runs.
 - Aligned Parquet writer properties with the parquet 58 API (`set_max_row_group_row_count`).
 - Avoided manual OAuth2, route resolution, and multipart namespace encoding logic previously needed for the schema-update fallback.
+
+### Documentation
+
+- Removed the `docs/configuration.md` claim that config values support `${VAR}` shell substitution. No such mechanism exists — following it would have authenticated with the literal string `${VAR}`. Replaced with the two real mechanisms: `{ file = "..." }` refs and `K2I_*` overrides.
+- Updated `README.md`, `docs/architecture.md`, and `docs/configuration.md`, which still described GCS and Azure as declared-but-unwired.
 
 ### Requirements
 

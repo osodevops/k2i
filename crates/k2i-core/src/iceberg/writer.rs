@@ -118,6 +118,11 @@ pub struct IcebergWriter {
     /// In-bucket prefix derived from `warehouse_path` for cloud backends where
     /// the object store root is the bucket, not the warehouse. `None` for local
     /// filesystem (handled by `LocalFileSystem::new_with_prefix`).
+    ///
+    /// This is applied **only** when addressing the object store (see
+    /// [`IcebergWriter::storage_path`]). Every path handed to the catalog, the
+    /// transaction log, or the read path stays warehouse-relative, because those
+    /// consumers resolve it against `warehouse_path` themselves.
     warehouse_prefix: Option<String>,
     txlog: Option<Arc<TransactionLog>>,
     write_count: AtomicU64,
@@ -241,11 +246,12 @@ impl IcebergWriter {
 
     /// Create object store based on configuration.
     ///
-    /// Returns the store and the in-bucket warehouse prefix to prepend to every
-    /// data/metadata path the writer uploads. For cloud backends the store root
-    /// is the bucket, so the prefix keeps uploads aligned with the warehouse
-    /// path recorded by the catalog/txlog. For local filesystem the prefix is
-    /// `None` because `LocalFileSystem::new_with_prefix` handles it.
+    /// Returns the store and the in-bucket warehouse prefix that
+    /// [`IcebergWriter::storage_path`] prepends when addressing that store. For
+    /// cloud backends the store root is the bucket, so the prefix keeps uploads
+    /// aligned with the warehouse path recorded by the catalog/txlog. For local
+    /// filesystem the prefix is `None` because `LocalFileSystem::new_with_prefix`
+    /// handles it.
     fn create_object_store(
         config: &IcebergConfig,
     ) -> Result<(Arc<dyn ObjectStore>, Option<String>)> {
@@ -670,8 +676,12 @@ impl IcebergWriter {
     }
 
     /// Upload a file to object storage.
+    ///
+    /// `path` is warehouse-relative; the in-bucket prefix is applied here so the
+    /// warehouse-relative form is what every other consumer sees.
     async fn upload_file(&self, path: &str, data: Bytes) -> Result<()> {
-        let object_path = ObjectPath::from(path);
+        let key = self.storage_path(path);
+        let object_path = ObjectPath::from(key.as_str());
         let payload = PutPayload::from_bytes(data);
 
         self.object_store
@@ -680,7 +690,7 @@ impl IcebergWriter {
             .map_err(|e| {
                 Error::Iceberg(IcebergError::FileUpload(format!(
                     "Failed to upload file to {}: {}",
-                    path, e
+                    key, e
                 )))
             })?;
 
@@ -897,10 +907,13 @@ impl IcebergWriter {
             partition_info.min_offset, partition_info.max_offset
         );
 
-        // Format: [warehouse_prefix]data/{db}/{table}/{time_partition}/kafka_partition={N}/part-{uuid}-{offset_range}.parquet
-        // The warehouse_prefix (in-bucket subpath for cloud backends) keeps
-        // uploads aligned with the warehouse path recorded by the catalog/txlog.
-        let relative = format!(
+        // Format: data/{db}/{table}/{time_partition}/kafka_partition={N}/part-{uuid}-{offset_range}.parquet
+        //
+        // Deliberately warehouse-relative: the catalog (`data_file_uri`), the
+        // read path (`absolute_data_path`), and the txlog all join this against
+        // `warehouse_path`. The in-bucket prefix is added separately by
+        // `storage_path` when addressing the object store.
+        format!(
             "data/{}/{}/{}/kafka_partition={}/part-{}-{}.parquet",
             self.config.database_name,
             self.config.table_name,
@@ -908,11 +921,22 @@ impl IcebergWriter {
             partition_info.kafka_partition,
             uuid,
             offset_range
-        );
+        )
+    }
 
+    /// Map a warehouse-relative path to the key used to address the object store.
+    ///
+    /// For cloud backends the store is rooted at the bucket, so the in-bucket
+    /// warehouse prefix must be prepended: a warehouse of `s3://bucket/warehouse`
+    /// turns `data/db/tbl/f.parquet` into `warehouse/data/db/tbl/f.parquet`, which
+    /// lands at `s3://bucket/warehouse/data/db/tbl/f.parquet` — exactly where the
+    /// catalog's `warehouse_path` + relative-path join points. For the local
+    /// filesystem the store is already rooted at the warehouse, so the path is
+    /// returned unchanged.
+    fn storage_path(&self, relative_path: &str) -> String {
         match &self.warehouse_prefix {
-            Some(prefix) => format!("{prefix}/{relative}"),
-            None => relative,
+            Some(prefix) => format!("{}/{}", prefix, relative_path.trim_start_matches('/')),
+            None => relative_path.to_string(),
         }
     }
 
@@ -1390,6 +1414,18 @@ mod tests {
         );
     }
 
+    fn test_partition_info() -> PartitionInfo {
+        PartitionInfo {
+            topic: "test".to_string(),
+            kafka_partition: 0,
+            event_timestamp_ms: chrono::Utc::now().timestamp_millis(),
+            min_offset: 100,
+            max_offset: 200,
+            min_lsn: 1,
+            max_lsn: 2,
+        }
+    }
+
     #[tokio::test]
     async fn test_generate_file_path_has_no_prefix_for_local() {
         // Local filesystem store roots at the warehouse path itself, so the
@@ -1398,20 +1434,129 @@ mod tests {
         let config = create_test_config(temp_dir.path().to_str().unwrap());
         let writer = IcebergWriter::new(config).await.unwrap();
 
-        let partition_info = PartitionInfo {
-            topic: "test".to_string(),
-            kafka_partition: 0,
-            event_timestamp_ms: chrono::Utc::now().timestamp_millis(),
-            min_offset: 100,
-            max_offset: 200,
-            min_lsn: 1,
-            max_lsn: 2,
-        };
-        let path = writer.generate_file_path(&partition_info);
+        let path = writer.generate_file_path(&test_partition_info());
         assert!(
             path.starts_with("data/test_db/"),
             "local store path should NOT have a warehouse prefix, got: {path}"
         );
         assert_eq!(writer.warehouse_prefix, None);
+        assert_eq!(writer.storage_path(&path), path);
+    }
+
+    /// The catalog (`data_file_uri`), the read path (`absolute_data_path`) and
+    /// the txlog all resolve a data file by joining `warehouse_path` with the
+    /// writer's path. If `generate_file_path` itself carried the in-bucket
+    /// prefix, that join would double it — the catalog would point at
+    /// `s3://bucket/warehouse/warehouse/data/...` while the upload landed at
+    /// `s3://bucket/warehouse/data/...`, so every committed file would be
+    /// unreadable.
+    #[tokio::test]
+    async fn test_cloud_file_path_is_warehouse_relative_but_upload_key_is_prefixed() {
+        let mut config = create_test_config("s3://my-bucket/warehouse");
+        config.aws_region = Some("us-east-1".into());
+        config.aws_access_key_id = Some("test-key".into());
+        config.aws_secret_access_key = Some("test-secret".into());
+
+        let writer = IcebergWriter::new(config).await.unwrap();
+        assert_eq!(writer.warehouse_prefix.as_deref(), Some("warehouse"));
+
+        let relative = writer.generate_file_path(&test_partition_info());
+        assert!(
+            relative.starts_with("data/test_db/test_table/"),
+            "catalog-visible path must stay warehouse-relative, got: {relative}"
+        );
+        assert!(
+            !relative.starts_with("warehouse/"),
+            "catalog-visible path must not carry the in-bucket prefix, got: {relative}"
+        );
+
+        // The object store is rooted at the bucket, so the upload key does carry it.
+        let key = writer.storage_path(&relative);
+        assert_eq!(key, format!("warehouse/{relative}"));
+
+        // Joining warehouse_path with the relative path, as `data_file_uri` and
+        // `absolute_data_path` do, must land on exactly that object.
+        let catalog_uri = format!("{}/{}", writer.config.warehouse_path, relative);
+        assert_eq!(catalog_uri, format!("s3://my-bucket/{key}"));
+    }
+
+    /// A bucket-root warehouse has no prefix, so the upload key and the
+    /// catalog-visible path must be identical.
+    #[tokio::test]
+    async fn test_cloud_bucket_root_warehouse_has_no_prefix() {
+        let mut config = create_test_config("s3://my-bucket");
+        config.aws_region = Some("us-east-1".into());
+        config.aws_access_key_id = Some("test-key".into());
+        config.aws_secret_access_key = Some("test-secret".into());
+
+        let writer = IcebergWriter::new(config).await.unwrap();
+        assert_eq!(writer.warehouse_prefix, None);
+
+        let relative = writer.generate_file_path(&test_partition_info());
+        assert_eq!(writer.storage_path(&relative), relative);
+    }
+
+    /// The credential fall-through paths must construct a store *without*
+    /// credentials present, so GKE Workload Identity / AKS Managed Identity
+    /// resolve at request time rather than failing at startup.
+    #[tokio::test]
+    async fn test_cloud_stores_build_without_explicit_credentials() {
+        let gcs = IcebergWriter::new(create_test_config("gs://my-bucket/warehouse/prod"))
+            .await
+            .expect("GCS store should build and defer to Application Default Credentials");
+        assert_eq!(gcs.warehouse_prefix.as_deref(), Some("warehouse/prod"));
+
+        let mut azure_config =
+            create_test_config("abfs://cont@myacct.dfs.core.windows.net/warehouse/raw");
+        azure_config.azure_storage_account_name = Some("myacct".into());
+        let azure = IcebergWriter::new(azure_config)
+            .await
+            .expect("Azure store should build and defer to DefaultAzureCredential");
+        assert_eq!(azure.warehouse_prefix.as_deref(), Some("warehouse/raw"));
+    }
+
+    /// The account name cannot be derived from either URL form, so its absence
+    /// must surface as a named configuration error rather than an opaque one.
+    #[tokio::test]
+    async fn test_azure_without_account_name_reports_the_missing_field() {
+        let err = match IcebergWriter::new(create_test_config("az://cont/warehouse")).await {
+            Err(err) => err,
+            Ok(_) => panic!("Azure without an account name must fail"),
+        };
+        assert!(
+            err.to_string().contains("azure_storage_account_name"),
+            "error should name the missing field, got: {err}"
+        );
+    }
+
+    /// `gcs_bucket_name` overrides only the bucket; the in-bucket prefix still
+    /// comes from `warehouse_path`.
+    #[tokio::test]
+    async fn test_gcs_bucket_override_keeps_warehouse_prefix() {
+        let mut config = create_test_config("gs://path-bucket/warehouse");
+        config.gcs_bucket_name = Some("override-bucket".into());
+        let writer = IcebergWriter::new(config).await.unwrap();
+        assert_eq!(writer.warehouse_prefix.as_deref(), Some("warehouse"));
+    }
+
+    /// An end-to-end proof against a real (local) store: the path the writer
+    /// reports must be resolvable against `warehouse_path` on disk.
+    #[tokio::test]
+    async fn test_reported_file_path_resolves_against_warehouse_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let warehouse = temp_dir.path().to_str().unwrap().to_string();
+        let writer = IcebergWriter::new(create_test_config(&warehouse))
+            .await
+            .unwrap();
+
+        let stats = writer.write_batch(create_test_batch(), 100).await.unwrap();
+
+        let resolved = std::path::Path::new(&warehouse).join(&stats.file_path);
+        assert!(
+            resolved.exists(),
+            "reported file_path {} must resolve under warehouse {}",
+            stats.file_path,
+            warehouse
+        );
     }
 }

@@ -133,7 +133,11 @@ rest_uri = "http://localhost:8181"
 #   warehouse_path = "abfs://my-container@mystorageaccount.dfs.core.windows.net/warehouse"
 #   azure_storage_account_name = "mystorageaccount"  # REQUIRED
 #   azure_container_name = "my-container"  # optional: override container from path
-#   azure_access_key = "${AZURE_STORAGE_ACCESS_KEY}"  # optional
+#   azure_access_key = "..."  # optional; or { file = "/etc/secrets/k2i/azure-key" }
+#
+# Note: values are not shell-interpolated. To source a credential from the
+# environment use K2I_ICEBERG_AZURE_ACCESS_KEY, and to source it from a file use
+# the `{ file = "..." }` form — not "${VAR}".
 #
 # When azure_access_key is omitted, the SDK uses the DefaultAzureCredential
 # chain: environment variables -> Managed Identity (on AKS) -> Azure CLI.
@@ -141,6 +145,10 @@ rest_uri = "http://localhost:8181"
 # without explicit keys.
 
 # Partition specification
+# [[iceberg.partition_spec]]
+# source_field = "event_timestamp"
+# transform = "day"
+
 [buffer]
 ttl_seconds = 60
 max_size_mb = 500

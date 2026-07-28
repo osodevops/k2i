@@ -94,9 +94,14 @@ aws_secret_access_key = { file = "/etc/secrets/k2i/aws-secret-access-key" }
 
 ## Pattern B: environment variables
 
-Every field can be overridden with a `K2I_` prefixed variable:
-`K2I_` + uppercase field path with `_` separators. Secrets come from
-`secretKeyRef`; plain values from `env` or `configMapKeyRef`.
+The fields listed in [Supported variables](#supported-variables) can be
+overridden with a `K2I_` prefixed variable: `K2I_` + uppercase field path with
+`_` separators. Secrets come from `secretKeyRef`; plain values from `env` or
+`configMapKeyRef`.
+
+Anything outside that table has no env override — set it in the TOML file. A
+`K2I_*` variable that is not recognized is logged at startup, so a typo such as
+`K2I_KAFKA_TOPC` is reported rather than silently ignored.
 
 ```yaml
 spec:
@@ -146,6 +151,10 @@ comma-separated.
 | `K2I_ICEBERG_AWS_REGION` | `iceberg.aws_region` |
 | `K2I_ICEBERG_AWS_ACCESS_KEY_ID` | `iceberg.aws_access_key_id` |
 | `K2I_ICEBERG_AWS_SECRET_ACCESS_KEY` | `iceberg.aws_secret_access_key` |
+| `K2I_ICEBERG_GCS_BUCKET_NAME` | `iceberg.gcs_bucket_name` |
+| `K2I_ICEBERG_GCS_SERVICE_ACCOUNT_PATH` | `iceberg.gcs_service_account_path` |
+| `K2I_ICEBERG_AZURE_STORAGE_ACCOUNT_NAME` | `iceberg.azure_storage_account_name` (required for Azure) |
+| `K2I_ICEBERG_AZURE_CONTAINER_NAME` | `iceberg.azure_container_name` |
 | `K2I_ICEBERG_AZURE_ACCESS_KEY` | `iceberg.azure_access_key` |
 | `K2I_ICEBERG_S3_ENDPOINT` | `iceberg.s3_endpoint` |
 | `K2I_ICEBERG_REST_URI` | `iceberg.rest_uri` |
