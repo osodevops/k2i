@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-28
+
 ### Added
 
 - Implemented `create_gcs_store()` via `object_store::gcp::GoogleCloudStorageBuilder`, falling through to Application Default Credentials (Workload Identity on GKE) when `gcs_service_account_path` is unset.
