@@ -491,8 +491,10 @@ export K2I_ICEBERG_AWS_ACCESS_KEY_ID=AKIA...
 export K2I_ICEBERG_AWS_SECRET_ACCESS_KEY=...
 ```
 
-Credential fields are redacted in `Debug` output. Prefer file refs over env vars
-where the threat model includes other processes reading `/proc/<pid>/environ`.
+Credential fields are redacted in both `Debug` output and serde serialization,
+so neither a log line nor a configuration dump can leak them. Prefer file refs
+over env vars where the threat model includes other processes reading
+`/proc/<pid>/environ`.
 
 See [Kubernetes deployment](./kubernetes.md) for the full variable table and the
 manifest patterns for both approaches.

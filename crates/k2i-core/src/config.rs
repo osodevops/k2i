@@ -19,17 +19,27 @@ use std::path::PathBuf;
 /// File contents are trimmed. Read the value explicitly with
 /// [`Secret::expose`] or via `Deref` (`&*secret`).
 ///
-/// Note that `Debug` is the only redacted output. [`Serialize`] is
-/// `transparent` and emits the plaintext, so that a `Config` round-trips
-/// faithfully. Nothing currently serializes `Config`; if that changes — a
-/// `config dump` subcommand, an RPC response echoing settings — the secret
-/// would go out in the clear. Redact at that call site, or give `Secret` a
-/// redacting `Serialize` and accept that the output no longer round-trips.
-#[derive(Clone, PartialEq, Eq, Serialize)]
-#[serde(transparent)]
+/// # Output is redacted
+///
+/// Both `Debug` and [`Serialize`] redact: they emit [`Secret::REDACTED`], never
+/// the value. `Config` derives `Serialize`, so any future code that dumps or
+/// echoes the configuration — a `config dump` subcommand, an RPC response, a
+/// diagnostic bundle — cannot leak a credential by accident. This mirrors the
+/// `secrecy` crate, which deliberately does not implement `Serialize` for
+/// secret-wrapped strings so that emitting one has to be a conscious act.
+///
+/// The trade-off is that a serialized `Config` does not round-trip: reading one
+/// back yields the literal `REDACTED` marker rather than the original
+/// credential. That is intentional — a visibly broken credential is a far better
+/// failure than a silently leaked one. Code that genuinely needs the plaintext
+/// must call [`Secret::expose`] at the point of use.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Secret(String);
 
 impl Secret {
+    /// The placeholder emitted by `Debug` and `Serialize` in place of the value.
+    pub const REDACTED: &'static str = "REDACTED";
+
     /// Wrap a plaintext value as a secret.
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
@@ -43,7 +53,18 @@ impl Secret {
 
 impl std::fmt::Debug for Secret {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Secret(REDACTED)")
+        write!(f, "Secret({})", Self::REDACTED)
+    }
+}
+
+impl Serialize for Secret {
+    /// Emits [`Secret::REDACTED`] rather than the value. See the type docs for
+    /// why this deliberately breaks round-tripping.
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(Self::REDACTED)
     }
 }
 
@@ -1105,6 +1126,68 @@ fn default_auto_create() -> bool {
     true
 }
 
+/// Extract the bucket from a cloud warehouse path, e.g. `s3://bucket/prefix`
+/// with `scheme = "s3://"` yields `Some("bucket")`.
+///
+/// Returns `None` when the path does not use `scheme` or names no bucket.
+/// Shared by [`Config::validate`] and the Iceberg writer so that what
+/// validation accepts is exactly what the writer can build a store from.
+pub(crate) fn bucket_from_warehouse(scheme: &str, warehouse_path: &str) -> Option<String> {
+    let bucket = warehouse_path.strip_prefix(scheme)?.split('/').next()?;
+    if bucket.is_empty() {
+        None
+    } else {
+        Some(bucket.to_string())
+    }
+}
+
+/// Extract the in-bucket prefix that follows the bucket in a cloud warehouse
+/// path: `gs://bucket/some/prefix` yields `Some("some/prefix")`.
+///
+/// Returns `None` when the path has no subpath past the bucket, e.g. `s3://bucket`.
+pub(crate) fn warehouse_prefix_after_bucket(scheme: &str, warehouse_path: &str) -> Option<String> {
+    let after_bucket = warehouse_path.strip_prefix(scheme)?.split_once('/')?.1;
+    let trimmed = after_bucket.trim_matches('/');
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Strip either Azure warehouse scheme, returning the remainder.
+fn strip_azure_scheme(warehouse_path: &str) -> Option<&str> {
+    warehouse_path
+        .strip_prefix("az://")
+        .or_else(|| warehouse_path.strip_prefix("abfs://"))
+}
+
+/// Extract the Azure container from a warehouse path, supporting both the
+/// simple form `az://container/path` and the Hadoop ABFS form
+/// `abfs://container@account.dfs.core.windows.net/path`.
+pub(crate) fn azure_container_from_warehouse(warehouse_path: &str) -> Option<String> {
+    let first_segment = strip_azure_scheme(warehouse_path)?.split('/').next()?;
+    // ABFS form: take the segment before `@`. The simple form has no `@`.
+    let container = first_segment.split('@').next()?;
+    if container.is_empty() {
+        None
+    } else {
+        Some(container.to_string())
+    }
+}
+
+/// Extract the in-bucket prefix following the container in an Azure warehouse
+/// path, for both the `az://` and `abfs://` forms.
+pub(crate) fn azure_prefix_after_container(warehouse_path: &str) -> Option<String> {
+    let after_container = strip_azure_scheme(warehouse_path)?.split_once('/')?.1;
+    let trimmed = after_container.trim_matches('/');
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 /// `K2I_*` prefixes owned by tooling rather than by [`Config`].
 ///
 /// These are consumed by the end-to-end test harness (`k2i-e2e-runner`) and its
@@ -1226,6 +1309,40 @@ impl Config {
 
         if self.iceberg.warehouse_path.is_empty() {
             return Err(crate::Error::Config("Warehouse path is required".into()));
+        }
+
+        // Fail at startup rather than on the first flush: the object store is
+        // not constructed until a writer is built, which for a long-running
+        // ingest means a misconfigured warehouse surfaces minutes in, after the
+        // process has already reported healthy.
+        let warehouse = &self.iceberg.warehouse_path;
+        if warehouse.starts_with("az://") || warehouse.starts_with("abfs://") {
+            if self.iceberg.azure_storage_account_name.is_none() {
+                return Err(crate::Error::Config(
+                    "iceberg.azure_storage_account_name is required for az:// and abfs:// warehouse paths (it cannot be derived from the path)"
+                        .into(),
+                ));
+            }
+            if self.iceberg.azure_container_name.is_none()
+                && azure_container_from_warehouse(warehouse).is_none()
+            {
+                return Err(crate::Error::Config(format!(
+                    "could not determine the Azure container from warehouse path '{warehouse}'; set iceberg.azure_container_name"
+                )));
+            }
+        } else if warehouse.starts_with("gs://")
+            && self.iceberg.gcs_bucket_name.is_none()
+            && bucket_from_warehouse("gs://", warehouse).is_none()
+        {
+            return Err(crate::Error::Config(format!(
+                "could not determine the GCS bucket from warehouse path '{warehouse}'; set iceberg.gcs_bucket_name"
+            )));
+        } else if warehouse.starts_with("s3://")
+            && bucket_from_warehouse("s3://", warehouse).is_none()
+        {
+            return Err(crate::Error::Config(format!(
+                "could not determine the S3 bucket from warehouse path '{warehouse}'"
+            )));
         }
 
         if self.iceberg.catalog_type == CatalogType::Sql {
@@ -2299,6 +2416,220 @@ table_name = "tbl"
         }
 
         std::env::remove_var("K2I_RPC_ENABLED");
+    }
+
+    /// `Config` derives `Serialize`. Anything that dumps or echoes it — a
+    /// diagnostic bundle, an RPC response, a future `config dump` — must not be
+    /// able to emit a credential in the clear.
+    #[test]
+    fn test_serializing_config_never_emits_a_plaintext_secret() {
+        let mut config = test_config();
+        config.kafka.security.sasl_username = Some(Secret::new("svc-account"));
+        config.kafka.security.sasl_password = Some(Secret::new("hunter2"));
+        config.iceberg.aws_access_key_id = Some(Secret::new("AKIAPLAINTEXT"));
+        config.iceberg.aws_secret_access_key = Some(Secret::new("aws-secret-value"));
+        config.iceberg.azure_access_key = Some(Secret::new("azure-secret-value"));
+        config.iceberg.rest.credential = Some(Secret::new("bearer-token-value"));
+        config.iceberg.rest.oauth2_client_id = Some(Secret::new("oauth-client-id"));
+        config.iceberg.rest.oauth2_client_secret = Some(Secret::new("oauth-client-secret"));
+
+        let json = serde_json::to_string(&config).expect("Config should serialize");
+        let toml_out = toml::to_string(&config).expect("Config should serialize to TOML");
+        let debug = format!("{config:?}");
+
+        for secret in [
+            "svc-account",
+            "hunter2",
+            "AKIAPLAINTEXT",
+            "aws-secret-value",
+            "azure-secret-value",
+            "bearer-token-value",
+            "oauth-client-id",
+            "oauth-client-secret",
+        ] {
+            assert!(!json.contains(secret), "JSON leaked {secret}");
+            assert!(!toml_out.contains(secret), "TOML leaked {secret}");
+            assert!(!debug.contains(secret), "Debug leaked {secret}");
+        }
+
+        assert!(json.contains(Secret::REDACTED));
+        assert!(debug.contains(Secret::REDACTED));
+    }
+
+    /// `expose()` remains the single deliberate way to read the value, so the
+    /// redacted output above does not come at the cost of actually using it.
+    #[test]
+    fn test_expose_still_returns_the_plaintext() {
+        let secret = Secret::new("hunter2");
+        assert_eq!(secret.expose(), "hunter2");
+        assert_eq!(&*secret, "hunter2");
+    }
+
+    #[test]
+    fn test_bucket_from_warehouse() {
+        assert_eq!(
+            bucket_from_warehouse("s3://", "s3://my-bucket/warehouse"),
+            Some("my-bucket".to_string())
+        );
+        // Bucket with no subpath
+        assert_eq!(
+            bucket_from_warehouse("s3://", "s3://my-bucket"),
+            Some("my-bucket".to_string())
+        );
+        // Wrong scheme
+        assert_eq!(
+            bucket_from_warehouse("s3://", "gs://bucket/warehouse"),
+            None
+        );
+        // Missing bucket
+        assert_eq!(bucket_from_warehouse("s3://", "s3:///warehouse"), None);
+        assert_eq!(bucket_from_warehouse("s3://", "s3://"), None);
+    }
+
+    #[test]
+    fn test_warehouse_prefix_after_bucket_strips_scheme_and_bucket() {
+        // Bucket-only path: no prefix
+        assert_eq!(
+            warehouse_prefix_after_bucket("s3://", "s3://my-bucket"),
+            None
+        );
+        // Trailing slash normalizes to None
+        assert_eq!(
+            warehouse_prefix_after_bucket("s3://", "s3://my-bucket/"),
+            None
+        );
+        // Single-segment prefix
+        assert_eq!(
+            warehouse_prefix_after_bucket("s3://", "s3://my-bucket/warehouse"),
+            Some("warehouse".to_string())
+        );
+        // Multi-segment prefix preserved
+        assert_eq!(
+            warehouse_prefix_after_bucket("gs://", "gs://bucket/warehouse/prod"),
+            Some("warehouse/prod".to_string())
+        );
+        // Wrong scheme returns None
+        assert_eq!(
+            warehouse_prefix_after_bucket("s3://", "gs://bucket/warehouse"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_azure_container_from_warehouse_both_url_forms() {
+        // Simple form: az://container/path
+        assert_eq!(
+            azure_container_from_warehouse("az://my-container/warehouse"),
+            Some("my-container".to_string())
+        );
+        // Container-only (no subpath)
+        assert_eq!(
+            azure_container_from_warehouse("az://my-container"),
+            Some("my-container".to_string())
+        );
+        // Hadoop ABFS form must extract the container BEFORE the `@`,
+        // not the whole `container@account.dfs.core.windows.net` segment.
+        assert_eq!(
+            azure_container_from_warehouse("abfs://container@account.dfs.core.windows.net/path"),
+            Some("container".to_string())
+        );
+        // ABFS with multi-segment path
+        assert_eq!(
+            azure_container_from_warehouse("abfs://events@prodacct/warehouse/raw"),
+            Some("events".to_string())
+        );
+        // Not an azure scheme
+        assert_eq!(azure_container_from_warehouse("s3://bucket/path"), None);
+        // Empty container before `@`
+        assert_eq!(azure_container_from_warehouse("az://@account/path"), None);
+    }
+
+    #[test]
+    fn test_azure_prefix_after_container() {
+        // No subpath past container
+        assert_eq!(azure_prefix_after_container("az://container"), None);
+        // Simple form subpath
+        assert_eq!(
+            azure_prefix_after_container("az://container/warehouse"),
+            Some("warehouse".to_string())
+        );
+        // ABFS form: prefix is the part AFTER the first `/`, unaffected by `@account`
+        assert_eq!(
+            azure_prefix_after_container(
+                "abfs://container@account.dfs.core.windows.net/warehouse/raw"
+            ),
+            Some("warehouse/raw".to_string())
+        );
+        // Wrong scheme
+        assert_eq!(azure_prefix_after_container("gs://bucket/warehouse"), None);
+    }
+
+    /// `test_config()` intentionally uses a SQL catalog without its settings, so
+    /// it fails `validate()` for reasons unrelated to the warehouse path. These
+    /// tests need a baseline that otherwise passes.
+    fn validatable_config() -> Config {
+        let mut config = test_config();
+        config.iceberg.catalog_type = CatalogType::Rest;
+        config.iceberg.sql_catalog = None;
+        config
+    }
+
+    /// Azure needs a storage account name that cannot be derived from either
+    /// URL form. Catching it in `validate()` means a misconfigured deployment
+    /// fails at startup instead of on the first flush, minutes after the
+    /// process has already reported healthy.
+    #[test]
+    fn test_validate_requires_azure_storage_account_name() {
+        let mut config = validatable_config();
+        config.iceberg.warehouse_path = "az://my-container/warehouse".into();
+
+        let err = config
+            .validate()
+            .expect_err("Azure warehouse without an account name must fail validation");
+        assert!(
+            err.to_string().contains("azure_storage_account_name"),
+            "error should name the missing field, got: {err}"
+        );
+
+        config.iceberg.azure_storage_account_name = Some("myacct".into());
+        config.validate().expect("should validate once set");
+    }
+
+    #[test]
+    fn test_validate_accepts_abfs_form_with_account_name() {
+        let mut config = validatable_config();
+        config.iceberg.warehouse_path = "abfs://cont@myacct.dfs.core.windows.net/warehouse".into();
+        config.iceberg.azure_storage_account_name = Some("myacct".into());
+        config.validate().expect("ABFS form should validate");
+    }
+
+    #[test]
+    fn test_validate_rejects_cloud_warehouse_without_a_bucket() {
+        for path in ["s3://", "gs://", "s3:///warehouse"] {
+            let mut config = validatable_config();
+            config.iceberg.warehouse_path = path.into();
+            assert!(
+                config.validate().is_err(),
+                "{path} names no bucket and should fail validation"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_accepts_ordinary_cloud_and_local_warehouses() {
+        for path in [
+            "s3://bucket/warehouse",
+            "s3://bucket",
+            "gs://bucket/warehouse/prod",
+            "/tmp/warehouse",
+            "file:///tmp/warehouse",
+        ] {
+            let mut config = validatable_config();
+            config.iceberg.warehouse_path = path.into();
+            config
+                .validate()
+                .unwrap_or_else(|e| panic!("{path} should validate, got: {e}"));
+        }
     }
 
     #[test]

@@ -8,6 +8,10 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/test.yml'
+      # config.rs asserts every K2I_* variable is documented in docs/kubernetes.md,
+      # so documentation changes can break the build and must be tested.
+      - 'docs/**'
+      - 'config/**'
   pull_request:
     branches: [main]
     paths:
@@ -15,6 +19,10 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/test.yml'
+      # config.rs asserts every K2I_* variable is documented in docs/kubernetes.md,
+      # so documentation changes can break the build and must be tested.
+      - 'docs/**'
+      - 'config/**'
 
 permissions:
   contents: read
@@ -133,13 +141,16 @@ jobs:
             ${{ runner.os }}-cargo-unit-
             ${{ runner.os }}-cargo-check-
 
+      # --include-ignored is required: every container-backed test is marked
+      # #[ignore = "requires Docker"] so it stays out of `cargo test`. Without
+      # this flag the job provisions Docker and then runs no Docker test at all.
       - name: Run integration tests
-        run: cargo test --test '*' --all-features -- --nocapture
+        run: cargo test --test '*' --all-features -- --nocapture --include-ignored
         env:
           DOCKER_HOST: unix:///var/run/docker.sock
           RUST_LOG: debug
           TESTCONTAINERS: "true"
-        timeout-minutes: 15
+        timeout-minutes: 20
 
   # Security audit
   security-audit:

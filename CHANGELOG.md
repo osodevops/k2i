@@ -14,8 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Documented that omitting `aws_access_key_id`/`aws_secret_access_key` activates the `AmazonS3Builder` default credential chain (env vars → IMDS → IRSA), unblocking EKS with IRSA and EC2 instance profiles without explicit config.
 - Added `gcs_bucket_name`, `gcs_service_account_path`, `azure_container_name`, `azure_storage_account_name`, and `azure_access_key` fields to `IcebergConfig` for credential overrides and the Azure-required account name.
 
+### Security
+
+- `Secret` now redacts in `serde` serialization as well as `Debug`, emitting `REDACTED` in place of the value. `Config` derives `Serialize`, so previously any code that dumped or echoed the configuration would have emitted credentials in the clear. This follows the `secrecy` crate's convention of not implementing `Serialize` for secret-wrapped strings, so that emitting one must be a conscious act. The trade-off is deliberate and documented: a serialized `Config` no longer round-trips, since reading it back yields the literal `REDACTED` marker.
+
 ### Changed
 
+- `Config::validate` now rejects cloud warehouse settings that cannot be satisfied, rather than deferring the failure to the first flush: `azure_storage_account_name` is required for `az://` and `abfs://` paths, and `s3://`/`gs://` paths must name a bucket. A long-running ingest previously reported healthy and only failed minutes later, on its first write.
+- Warehouse-path parsing (bucket, Azure container, in-bucket prefix) is now defined once in `config` and shared with the Iceberg writer, so what validation accepts is exactly what the writer can build a store from.
 - Bumped the workspace version to 0.3.0 to absorb the semver-major addition of public fields on the externally-constructible `IcebergConfig` struct. The 0.x convention treats a minor bump (0.2 → 0.3) as the breaking-change boundary.
 - Upgraded the official Apache Iceberg Rust client from 0.7 to 0.10.0 and the Arrow/Parquet ecosystem from 54 to 58.
 - Removed the temporary standalone REST `update_schema` fallback now that `Transaction::update_schema()` is available in `iceberg-rust` 0.10.0.
@@ -31,6 +37,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The unrecognized-variable warning no longer fires for `K2I_E2E_*` and the other harness variables that share the engine's environment during end-to-end runs.
 - Aligned Parquet writer properties with the parquet 58 API (`set_max_row_group_row_count`).
 - Avoided manual OAuth2, route resolution, and multipart namespace encoding logic previously needed for the schema-update fallback.
+
+### Testing
+
+- Added container-backed S3 round-trip tests (MinIO) covering a prefixed warehouse (`s3://bucket/warehouse`), a multi-segment prefix, and a bucket-root warehouse. Each asserts that joining `warehouse_path` with the writer's reported path resolves to a real stored object, and that nothing was written to the doubled-prefix or bucket-root locations. These reproduce the warehouse-prefix defect above; they fail against the previous behaviour.
+- CI's integration-tests job now passes `--include-ignored`. Every container-backed test is marked `#[ignore = "requires Docker"]`, so the job provisioned Docker and then ran no Docker test at all — including the pre-existing Kafka integration tests.
+- The Tests workflow now also triggers on `docs/**` and `config/**`, since a test asserts that every `K2I_*` variable is documented in `docs/kubernetes.md`.
 
 ### Documentation
 

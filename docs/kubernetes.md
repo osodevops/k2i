@@ -221,9 +221,17 @@ aws_secret_access_key = { file = "/mnt/secrets/aws-secret-access-key" }
 
 ## Notes
 
-- **Secret redaction**: secret fields are wrapped in a `Secret` type whose
-  `Debug` output is `Secret(REDACTED)`, so `{:?}` dumps of the configuration
-  do not leak values. The value is only exposed through explicit accessors.
+- **Secret redaction**: secret fields are wrapped in a `Secret` type that
+  redacts in **both** `Debug` and `serde` serialization, emitting `REDACTED` in
+  place of the value. Neither a `{:?}` dump nor a JSON/TOML serialization of the
+  configuration can leak a credential. The value is reachable only through the
+  explicit `expose()` accessor. The trade-off is deliberate: a serialized
+  configuration does not round-trip, because reading it back yields the literal
+  `REDACTED` marker rather than the original credential.
+- **Fail-fast validation**: warehouse settings that cannot be derived from the
+  path — notably `azure_storage_account_name` — are checked at startup rather
+  than on the first flush, so a misconfigured deployment fails immediately
+  instead of after the process has reported healthy.
 - **Env var visibility**: values injected via `env` are visible in
   `/proc/<pid>/environ` to other processes with sufficient privileges and in
   `kubectl describe pod` output is limited to the reference (not the value),

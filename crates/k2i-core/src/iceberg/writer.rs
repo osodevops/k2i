@@ -17,7 +17,10 @@
 //! - Atomic commits with CAS semantics via TransactionCoordinator
 //! - Metadata caching via MetadataCache
 
-use crate::config::{IcebergConfig, ParquetCompression};
+use crate::config::{
+    azure_container_from_warehouse, azure_prefix_after_container, bucket_from_warehouse,
+    warehouse_prefix_after_bucket, IcebergConfig, ParquetCompression,
+};
 use crate::iceberg::factory::{
     CatalogOperations, DataFileInfo, SnapshotCommit, SnapshotCommitResult,
 };
@@ -269,49 +272,14 @@ impl IcebergWriter {
         }
     }
 
-    /// Extract the in-bucket prefix from a cloud warehouse path.
-    ///
-    /// Given `gs://bucket/some/prefix` returns `Some("some/prefix")`. Returns
-    /// `None` when the path has no subpath past the bucket (e.g. `s3://bucket`).
-    fn warehouse_prefix_after_bucket(scheme: &str, warehouse_path: &str) -> Option<String> {
-        let after_scheme = warehouse_path.strip_prefix(scheme)?;
-        let after_bucket = after_scheme.split_once('/')?.1;
-        let trimmed = after_bucket.trim_matches('/');
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
-    }
-
-    /// Extract the in-bucket prefix from an Azure warehouse path that may use
-    /// the Hadoop ABFS form `abfs://container@account.../prefix` or the simpler
-    /// `az://container/prefix`.
-    fn warehouse_prefix_after_azure_container(warehouse_path: &str) -> Option<String> {
-        let after_scheme = warehouse_path
-            .strip_prefix("az://")
-            .or_else(|| warehouse_path.strip_prefix("abfs://"))?;
-        let after_container = after_scheme.split_once('/')?.1;
-        let trimmed = after_container.trim_matches('/');
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
-    }
-
     fn create_s3_store(config: &IcebergConfig) -> Result<(Arc<dyn ObjectStore>, Option<String>)> {
         use object_store::aws::AmazonS3Builder;
 
-        let bucket = config
-            .warehouse_path
-            .strip_prefix("s3://")
-            .and_then(|s| s.split('/').next())
-            .ok_or_else(|| {
-                Error::Iceberg(IcebergError::CatalogConnection("Invalid S3 path".into()))
-            })?;
+        let bucket = bucket_from_warehouse("s3://", &config.warehouse_path).ok_or_else(|| {
+            Error::Iceberg(IcebergError::CatalogConnection("Invalid S3 path".into()))
+        })?;
 
-        let warehouse_prefix = Self::warehouse_prefix_after_bucket("s3://", &config.warehouse_path);
+        let warehouse_prefix = warehouse_prefix_after_bucket("s3://", &config.warehouse_path);
 
         let mut builder = AmazonS3Builder::new().with_bucket_name(bucket);
 
@@ -350,13 +318,7 @@ impl IcebergWriter {
         let bucket = config
             .gcs_bucket_name
             .clone()
-            .or_else(|| {
-                config
-                    .warehouse_path
-                    .strip_prefix("gs://")
-                    .and_then(|s| s.split('/').next())
-                    .map(|s| s.to_string())
-            })
+            .or_else(|| bucket_from_warehouse("gs://", &config.warehouse_path))
             .ok_or_else(|| {
                 Error::Iceberg(IcebergError::CatalogConnection(
                     "Invalid GCS path: could not determine bucket".into(),
@@ -366,7 +328,7 @@ impl IcebergWriter {
         // The in-bucket prefix is derived from warehouse_path regardless of
         // whether gcs_bucket_name overrides the bucket, since the override only
         // changes the bucket and leaves the path structure intact.
-        let warehouse_prefix = Self::warehouse_prefix_after_bucket("gs://", &config.warehouse_path);
+        let warehouse_prefix = warehouse_prefix_after_bucket("gs://", &config.warehouse_path);
 
         let mut builder = GoogleCloudStorageBuilder::new().with_bucket_name(&bucket);
 
@@ -397,14 +359,14 @@ impl IcebergWriter {
         let container = config
             .azure_container_name
             .clone()
-            .or_else(|| Self::parse_azure_container(&config.warehouse_path))
+            .or_else(|| azure_container_from_warehouse(&config.warehouse_path))
             .ok_or_else(|| {
                 Error::Iceberg(IcebergError::CatalogConnection(
                     "Invalid Azure path: could not determine container".into(),
                 ))
             })?;
 
-        let warehouse_prefix = Self::warehouse_prefix_after_azure_container(&config.warehouse_path);
+        let warehouse_prefix = azure_prefix_after_container(&config.warehouse_path);
 
         let mut builder = MicrosoftAzureBuilder::new()
             .with_account(account_name)
@@ -421,24 +383,6 @@ impl IcebergWriter {
             .map_err(|e| Error::Iceberg(IcebergError::FileUpload(e.to_string())))?;
 
         Ok((Arc::new(store), warehouse_prefix))
-    }
-
-    /// Parse the Azure container name from a warehouse path supporting both
-    /// the simple form `az://container/path` and the Hadoop ABFS form
-    /// `abfs://container@account.dfs.core.windows.net/path`.
-    fn parse_azure_container(warehouse_path: &str) -> Option<String> {
-        let after_scheme = warehouse_path
-            .strip_prefix("az://")
-            .or_else(|| warehouse_path.strip_prefix("abfs://"))?;
-        let first_segment = after_scheme.split('/').next()?;
-        // ABFS form: `container@account.dfs.core.windows.net` — take the
-        // segment before `@` as the container. Simple form has no `@`.
-        let container = first_segment.split('@').next()?;
-        if container.is_empty() {
-            None
-        } else {
-            Some(container.to_string())
-        }
     }
 
     fn create_local_store(
@@ -1322,98 +1266,6 @@ mod tests {
         assert!(stats.snapshot_id > 0);
         assert!(!writer.has_catalog_integration());
     }
-    #[test]
-    fn test_warehouse_prefix_after_bucket_strips_scheme_and_bucket() {
-        // Bucket-only path: no prefix
-        assert_eq!(
-            IcebergWriter::warehouse_prefix_after_bucket("s3://my-bucket", "s3://my-bucket"),
-            None
-        );
-        // Trailing slash normalizes to None
-        assert_eq!(
-            IcebergWriter::warehouse_prefix_after_bucket("s3://my-bucket/", "s3://my-bucket/"),
-            None
-        );
-        // Single-segment prefix
-        assert_eq!(
-            IcebergWriter::warehouse_prefix_after_bucket("s3://", "s3://my-bucket/warehouse"),
-            Some("warehouse".to_string())
-        );
-        // Multi-segment prefix preserved
-        assert_eq!(
-            IcebergWriter::warehouse_prefix_after_bucket("gs://", "gs://bucket/warehouse/prod"),
-            Some("warehouse/prod".to_string())
-        );
-        // Wrong scheme returns None
-        assert_eq!(
-            IcebergWriter::warehouse_prefix_after_bucket("s3://", "gs://bucket/warehouse"),
-            None
-        );
-    }
-
-    #[test]
-    fn test_parse_azure_container_both_url_forms() {
-        // Simple form: az://container/path
-        assert_eq!(
-            IcebergWriter::parse_azure_container("az://my-container/warehouse"),
-            Some("my-container".to_string())
-        );
-        // Container-only (no subpath)
-        assert_eq!(
-            IcebergWriter::parse_azure_container("az://my-container"),
-            Some("my-container".to_string())
-        );
-        // Hadoop ABFS form must extract the container BEFORE the `@`,
-        // not the whole `container@account.dfs.core.windows.net` segment.
-        assert_eq!(
-            IcebergWriter::parse_azure_container(
-                "abfs://container@account.dfs.core.windows.net/path"
-            ),
-            Some("container".to_string())
-        );
-        // ABFS with multi-segment path
-        assert_eq!(
-            IcebergWriter::parse_azure_container("abfs://events@prodacct/warehouse/raw"),
-            Some("events".to_string())
-        );
-        // Not an azure scheme
-        assert_eq!(
-            IcebergWriter::parse_azure_container("s3://bucket/path"),
-            None
-        );
-        // Empty container after `@`
-        assert_eq!(
-            IcebergWriter::parse_azure_container("az://@account/path"),
-            None
-        );
-    }
-
-    #[test]
-    fn test_warehouse_prefix_after_azure_container_only_subpath() {
-        // No subpath past container
-        assert_eq!(
-            IcebergWriter::warehouse_prefix_after_azure_container("az://container"),
-            None
-        );
-        // Simple form subpath
-        assert_eq!(
-            IcebergWriter::warehouse_prefix_after_azure_container("az://container/warehouse"),
-            Some("warehouse".to_string())
-        );
-        // ABFS form: prefix is the part AFTER the first `/`, not affected by `@account`
-        assert_eq!(
-            IcebergWriter::warehouse_prefix_after_azure_container(
-                "abfs://container@account.dfs.core.windows.net/warehouse/raw"
-            ),
-            Some("warehouse/raw".to_string())
-        );
-        // Wrong scheme
-        assert_eq!(
-            IcebergWriter::warehouse_prefix_after_azure_container("gs://bucket/warehouse"),
-            None
-        );
-    }
-
     fn test_partition_info() -> PartitionInfo {
         PartitionInfo {
             topic: "test".to_string(),
