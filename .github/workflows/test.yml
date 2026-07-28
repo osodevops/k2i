@@ -7,7 +7,10 @@ on:
       - 'crates/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
-      - '.github/workflows/test.yml'
+      # All workflows, not just this one: the Check job guards the tag-only
+      # workflows' dependency lists, and it must run on the PR that edits them.
+      - '.github/workflows/**'
+      - 'scripts/**'
       # config.rs asserts every K2I_* variable is documented in docs/kubernetes.md,
       # so documentation changes can break the build and must be tested.
       - 'docs/**'
@@ -18,7 +21,10 @@ on:
       - 'crates/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
-      - '.github/workflows/test.yml'
+      # All workflows, not just this one: the Check job guards the tag-only
+      # workflows' dependency lists, and it must run on the PR that edits them.
+      - '.github/workflows/**'
+      - 'scripts/**'
       # config.rs asserts every K2I_* variable is documented in docs/kubernetes.md,
       # so documentation changes can break the build and must be tested.
       - 'docs/**'
@@ -59,6 +65,11 @@ jobs:
           key: ${{ runner.os }}-cargo-check-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-check-
+
+      # Cheap and first: the tag-only workflows cannot catch their own drift,
+      # so this guards them from a PR that never runs them.
+      - name: Check workflow dependency consistency
+        run: scripts/check-workflow-deps.sh
 
       - name: Check formatting
         run: cargo fmt --all -- --check
