@@ -8,6 +8,9 @@ mechanisms on top, so no secret ever needs to live in a ConfigMap:
 2. **`K2I_*` environment variables** — override any field at runtime, designed
    for `env` / `envFrom` injection from `Secret` resources.
 
+Storage volumes for durable state are covered in [State
+persistence](#state-persistence).
+
 Precedence (highest wins):
 
 1. `K2I_*` environment variables
@@ -16,6 +19,203 @@ Precedence (highest wins):
 Invalid numeric/enum env values are rejected with a warning (the TOML or
 default value is preserved), and unrecognized `K2I_*` variables are logged so
 typos do not fail silently.
+
+## State persistence
+
+K2I writes durable state to disk. On Kubernetes, mount each path below on the
+storage that matches its role. The image creates `/var/lib/k2i/txlog`, but its
+contents only survive a pod restart if a volume is mounted there.
+
+| Path (container) | Config key | Purpose | Persistence | Recommended volume | If lost |
+|---|---|---|---|---|---|
+| `/var/lib/k2i/txlog` | `transaction_log.log_dir` | Transaction log: offset markers, flush start/complete records, committed data-file records, idempotency records, checkpoints, schema-evolution and maintenance events. Newline-delimited JSON files named `txlog-<uuid>.jsonl`. | Required | `PersistentVolumeClaim`, `ReadWriteOnce` | K2I's recovery and idempotency history is gone. Kafka's group offsets are unaffected, so the consumer resumes from the last broker-committed offset; in-flight flush state, committed-file bookkeeping for the read RPC, and deduplication history cannot be reconstructed. Parquet files written by an incomplete flush are left as orphans. |
+| `/var/lib/k2i/txlog/schema-cache` | none; derived from `transaction_log.log_dir` | Stale Schema Registry disk cache for Protobuf descriptors. | Optional | `emptyDir` | No data or offset loss. Descriptors are fetched again from Schema Registry. While the registry is unreachable, the stale-cache fallback is unavailable, so startup or schema resolution can fail if the registry is also down. |
+| `/var/lib/k2i/warehouse` | `iceberg.warehouse_path` | **Local filesystem warehouses only.** Parquet data files plus Iceberg metadata and manifests. | Required only when `warehouse_path` is a local path | `PersistentVolumeClaim`, `ReadWriteOnce` | The cold copy of the data is gone; hot buffer contents are also lost on restart. If Kafka offsets were already committed, K2I does not replay the topic automatically, so recovery needs an operator reset of the consumer group. Catalog entries can point at files that no longer exist. |
+| `/var/lib/k2i/catalog/catalog.db` | `iceberg.sql_catalog.url` | **`catalog_type = "sql"` with the SQLite backend only.** Namespace, table, current snapshot, and data-file rows. | Required for the SQLite SQL catalog | `PersistentVolumeClaim`, `ReadWriteOnce` | The catalog no longer knows the table or its files. Warehouse files remain on disk, but K2I cannot resolve them, and a later write can recreate the table empty. |
+
+The warehouse row does **not** apply to object-store warehouses. With an
+`iceberg.warehouse_path` of `s3://`, `gs://`, or `az://`/`abfs://`, Parquet and
+Iceberg metadata live outside the pod; only the transaction log (and the SQL
+catalog database, if used) needs local persistence.
+
+The transaction log default is `./transaction_logs`, relative to the process
+working directory. Set `transaction_log.log_dir` explicitly in containers so
+the path does not depend on the image working directory.
+
+If `rpc.enabled = true`, the read-state server writes a Unix socket at
+`rpc.socket_path` (default `./run/k2i.sock`, relative to the working
+directory). The socket is transient: mount a writable `emptyDir` and set an
+absolute path under it when RPC is enabled; it needs no PVC.
+
+Recovery limits — computed-but-unapplied offsets, per-entry fsync, and async
+Kafka commits — are summarized in
+[Persistence and recovery](./production-readiness.md#persistence-and-recovery).
+
+### Sizing and access modes
+
+- **Access mode:** use `ReadWriteOnce`. K2I is a single-process writer; never
+  run two pods against the same transaction-log or warehouse volume. Set
+  `strategy: Recreate` so a rollout stops the old pod before the new one
+  starts.
+- **Transaction log:** one `OffsetMarker` is written per message. The log
+  rotates at `checkpoint_interval_entries` (default 10,000) or
+  `checkpoint_interval_seconds` (default 300), keeping `max_log_files`
+  (default 10) files. Each marker is a short JSON line of roughly 150–200
+  bytes; size the volume from your message rate and start at 10Gi for
+  low-to-moderate rates. Monitor the directory and raise it as throughput
+  grows.
+- **Local warehouse:** size to the retained Parquet bytes plus Iceberg metadata
+  and manifests. Maintenance scheduling is not fully wired for every
+  deployment, so plan for growth instead of assuming retention will free space.
+- **SQLite catalog:** small — MiB for most tables, one row per data file. 1Gi
+  is ample to start.
+- **Schema cache:** a few MiB. An `emptyDir` with no size limit is enough; it
+  counts against the node's ephemeral storage. Because the cache lives inside
+  `transaction_log.log_dir`, the example below mounts an `emptyDir` over that
+  subdirectory, leaving the rest of the transaction log on the PVC.
+
+### Example: local warehouse on PVCs
+
+The manifest below persists the transaction log, the local warehouse, and the
+SQLite catalog, and keeps the schema cache ephemeral. It uses the embedded SQL
+catalog (`catalog_type = "sql"`) so the example needs no external catalog
+service; replace the ConfigMap with your own configuration. With an object-store
+warehouse, drop the warehouse and catalog claims and keep the transaction-log
+claim.
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: k2i-config
+data:
+  config.toml: |
+    [kafka]
+    bootstrap_servers = ["kafka:9092"]
+    topic = "events"
+    consumer_group = "k2i-ingestion"
+
+    [kafka.format]
+    type = "raw"
+
+    [iceberg]
+    catalog_type = "sql"
+    warehouse_path = "/var/lib/k2i/warehouse"
+    database_name = "raw"
+    table_name = "events"
+
+    [iceberg.sql_catalog]
+    type = "sqlite"
+    url = "sqlite:///var/lib/k2i/catalog/catalog.db"
+    catalog_name = "k2i"
+
+    [transaction_log]
+    log_dir = "/var/lib/k2i/txlog"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: k2i-txlog
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: k2i-warehouse
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: k2i-catalog
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: k2i
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: k2i
+  template:
+    metadata:
+      labels:
+        app: k2i
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: k2i
+          image: ghcr.io/osodevops/k2i:latest
+          args: ["ingest", "--config", "/etc/k2i/config.toml"]
+          ports:
+            - name: health
+              containerPort: 8080
+            - name: metrics
+              containerPort: 9090
+          volumeMounts:
+            - name: config
+              mountPath: /etc/k2i
+              readOnly: true
+            - name: txlog
+              mountPath: /var/lib/k2i/txlog
+            # Shadows only the cache subdirectory; the rest of the txlog stays
+            # on the PVC.
+            - name: schema-cache
+              mountPath: /var/lib/k2i/txlog/schema-cache
+            - name: warehouse
+              mountPath: /var/lib/k2i/warehouse
+            - name: catalog
+              mountPath: /var/lib/k2i/catalog
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: k2i-config
+        - name: txlog
+          persistentVolumeClaim:
+            claimName: k2i-txlog
+        - name: schema-cache
+          emptyDir: {}
+        - name: warehouse
+          persistentVolumeClaim:
+            claimName: k2i-warehouse
+        - name: catalog
+          persistentVolumeClaim:
+            claimName: k2i-catalog
+```
 
 ## Pattern A: projected secret files
 
