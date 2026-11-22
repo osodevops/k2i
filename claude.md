@@ -119,7 +119,7 @@ config/
 
 - Run `cargo build` to build the workspace
 - Run `cargo test` for unit tests
-- Integration tests require Docker (testcontainers for Kafka, MinIO, Iceberg REST catalog)
+- Integration tests require Docker (testcontainers for Kafka, Adobe S3Mock, Iceberg REST catalog)
 - Configuration lives in TOML files (see `config/example.toml`)
 - All errors use `thiserror` for typed errors, `anyhow` for context propagation
 - Metrics follow Prometheus naming conventions (`k2i_messages_total`, `k2i_flush_duration_seconds`)
