@@ -903,10 +903,6 @@ pub struct MonitoringConfig {
     /// Log format
     #[serde(default)]
     pub log_format: LogFormat,
-
-    /// Optional OpenTelemetry trace export. Disabled by default.
-    #[serde(default)]
-    pub otel: OtelConfig,
 }
 
 impl Default for MonitoringConfig {
@@ -916,7 +912,6 @@ impl Default for MonitoringConfig {
             health_port: default_health_port(),
             log_level: LogLevel::default(),
             log_format: LogFormat::default(),
-            otel: OtelConfig::default(),
         }
     }
 }
@@ -926,6 +921,12 @@ impl Default for MonitoringConfig {
 /// Opt-in: when `enabled` is false (the default) no exporter is built and the
 /// ingestion hot path creates no spans. When enabled, spans are exported over
 /// OTLP/gRPC to `endpoint` in addition to the existing JSON/text logs.
+///
+/// This lives in the same TOML file as [`Config`] (`[monitoring.otel]`) but is
+/// deliberately not a field of [`Config`] or [`MonitoringConfig`]: those types
+/// are exhaustively constructible public structs, so adding a public field is
+/// a breaking change for library users that build them with literals. Load it
+/// with [`OtelConfig::from_file`] or [`OtelConfig::from_toml_str`].
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct OtelConfig {
@@ -950,6 +951,33 @@ impl Default for OtelConfig {
 }
 
 impl OtelConfig {
+    /// Read `[monitoring.otel]` from a TOML document.
+    ///
+    /// Unrelated sections are ignored, so this works on a normal K2I config
+    /// file without deserializing the rest of [`Config`]. A missing section
+    /// yields the disabled default.
+    pub fn from_toml_str(content: &str) -> crate::Result<Self> {
+        #[derive(Default, Deserialize)]
+        struct MonitoringSection {
+            #[serde(default)]
+            otel: OtelConfig,
+        }
+
+        #[derive(Default, Deserialize)]
+        struct Root {
+            #[serde(default)]
+            monitoring: MonitoringSection,
+        }
+
+        let root: Root = toml::from_str(content)?;
+        Ok(root.monitoring.otel)
+    }
+
+    /// Read `[monitoring.otel]` from a config file.
+    pub fn from_file(path: &std::path::Path) -> crate::Result<Self> {
+        Self::from_toml_str(&std::fs::read_to_string(path)?)
+    }
+
     /// Apply `K2I_MONITORING_OTEL_*` overrides on top of TOML values.
     ///
     /// Exposed so the CLI can resolve the OTel settings before the tracing
@@ -1481,8 +1509,6 @@ impl Config {
             ));
         }
 
-        self.monitoring.otel.validate()?;
-
         if self.schema_evolution.schema_update_min_interval_seconds == 0 {
             return Err(crate::Error::Config(
                 "schema_evolution.schema_update_min_interval_seconds must be greater than zero"
@@ -1734,7 +1760,6 @@ impl Config {
                 None => warn_bad_enum("K2I_MONITORING_LOG_FORMAT", &v, &["json", "text"]),
             }
         }
-        self.monitoring.otel.apply_env_overrides();
 
         // --- RPC ---
         if let Some(v) = env_val("K2I_RPC_ENABLED") {
@@ -1927,9 +1952,6 @@ mod tests {
         assert!(!otel.enabled);
         assert_eq!(otel.endpoint, "http://localhost:4317");
         assert_eq!(otel.service_name, "k2i");
-
-        let monitoring = MonitoringConfig::default();
-        assert!(!monitoring.otel.enabled);
     }
 
     #[test]
@@ -1946,29 +1968,62 @@ mod tests {
 
     #[test]
     fn test_otel_config_absent_section_uses_defaults() {
-        let monitoring: MonitoringConfig = toml::from_str("metrics_port = 9091").unwrap();
-        assert!(!monitoring.otel.enabled);
-        assert_eq!(monitoring.otel, OtelConfig::default());
-
-        let parsed: OtelConfig = toml::from_str("").unwrap();
+        let parsed = OtelConfig::from_toml_str(
+            r#"
+[monitoring]
+metrics_port = 9091
+"#,
+        )
+        .unwrap();
         assert_eq!(parsed, OtelConfig::default());
+
+        let empty = OtelConfig::from_toml_str("").unwrap();
+        assert_eq!(empty, OtelConfig::default());
     }
 
     #[test]
     fn test_otel_config_parses_section() {
-        let monitoring: MonitoringConfig = toml::from_str(
+        let parsed = OtelConfig::from_toml_str(
             r#"
+[monitoring]
 metrics_port = 9090
-[otel]
+
+[monitoring.otel]
 enabled = true
 endpoint = "http://collector:4317"
 service_name = "ingest"
 "#,
         )
         .unwrap();
-        assert!(monitoring.otel.enabled);
-        assert_eq!(monitoring.otel.endpoint, "http://collector:4317");
-        assert_eq!(monitoring.otel.service_name, "ingest");
+        assert!(parsed.enabled);
+        assert_eq!(parsed.endpoint, "http://collector:4317");
+        assert_eq!(parsed.service_name, "ingest");
+    }
+
+    #[test]
+    fn test_otel_config_ignores_unrelated_config() {
+        let parsed = OtelConfig::from_toml_str(
+            r#"
+[kafka]
+bootstrap_servers = ["localhost:9092"]
+topic = "events"
+consumer_group = "k2i"
+
+[iceberg]
+catalog_type = "rest"
+warehouse_path = "/tmp/warehouse"
+database_name = "db"
+table_name = "tbl"
+
+[monitoring.otel]
+enabled = true
+endpoint = "http://collector:4317"
+service_name = "ingest"
+"#,
+        )
+        .unwrap();
+        assert!(parsed.enabled);
+        assert_eq!(parsed.service_name, "ingest");
     }
 
     #[test]

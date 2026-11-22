@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use k2i_core::config::LogFormat;
+use k2i_core::config::{LogFormat, OtelConfig};
 use k2i_core::Config;
 use std::path::PathBuf;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
@@ -364,11 +364,13 @@ async fn run_cli() -> ExitCode {
     // Parse the config once for settings that must exist before the subscriber
     // is built: log format plus the optional OTel exporter. Errors are ignored
     // here and reported by `load_config` when the command needs the config.
-    let startup_config = cli
+    let startup_content = cli
         .config
         .as_ref()
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .and_then(|content| toml::from_str::<Config>(&content).ok());
+        .and_then(|path| std::fs::read_to_string(path).ok());
+    let startup_config = startup_content
+        .as_ref()
+        .and_then(|content| toml::from_str::<Config>(content).ok());
 
     // `K2I_MONITORING_LOG_FORMAT` wins over the TOML value here for the same
     // reason it does in `Config::apply_env_overrides`; checking it directly means
@@ -382,9 +384,11 @@ async fn run_cli() -> ExitCode {
         })
         .unwrap_or(LogFormat::Json);
 
-    let mut otel_config = startup_config
+    // `[monitoring.otel]` is parsed separately from `Config` so that adding the
+    // section does not change the public shape of `Config`/`MonitoringConfig`.
+    let mut otel_config = startup_content
         .as_ref()
-        .map(|config| config.monitoring.otel.clone())
+        .and_then(|content| OtelConfig::from_toml_str(content).ok())
         .unwrap_or_default();
     otel_config.apply_env_overrides();
 
@@ -568,5 +572,12 @@ async fn execute_command(cli: Cli) -> Result<()> {
 
 fn load_config(path: &Option<PathBuf>) -> Result<Config> {
     let path = path.clone().unwrap_or_else(|| PathBuf::from("config.toml"));
-    Ok(Config::from_file(&path)?)
+    let config = Config::from_file(&path)?;
+    // `[monitoring.otel]` lives beside `Config`, not inside it; apply its env
+    // overrides and validate it here so `validate` and `ingest` report a bad
+    // endpoint or service name.
+    let mut otel = OtelConfig::from_file(&path)?;
+    otel.apply_env_overrides();
+    otel.validate()?;
+    Ok(config)
 }
