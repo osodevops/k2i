@@ -97,7 +97,7 @@ rest_uri = "http://localhost:8181"
 #   aws_region = "us-east-1"
 #   aws_access_key_id = "AKIA..."
 #   aws_secret_access_key = "..."
-#   s3_endpoint = "http://localhost:9000"  # For MinIO
+#   s3_endpoint = "http://localhost:9000"  # For a self-hosted S3-compatible endpoint (MinIO, LocalStack, ...)
 #
 # Or load from files (Kubernetes projected volumes):
 # aws_access_key_id = { file = "/etc/secrets/k2i/aws-key" }

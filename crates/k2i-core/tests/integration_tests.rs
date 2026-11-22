@@ -664,7 +664,7 @@ mod end_to_end {
 }
 
 /// End-to-end verification that data files land where the Iceberg catalog says
-/// they do, against a real S3 implementation (MinIO).
+/// they do, against a live S3-compatible server (Adobe S3Mock).
 ///
 /// For cloud backends the object store is rooted at the *bucket*, while the
 /// catalog, the transaction log, and the read path all locate a data file by
@@ -694,23 +694,41 @@ mod s3_object_store_integration {
     use std::sync::Arc;
 
     const BUCKET: &str = "k2i-test-bucket";
-    const ACCESS_KEY: &str = "minioadmin";
-    const SECRET_KEY: &str = "minioadmin";
+    const REGION: &str = "us-east-1";
+    /// S3Mock does not authenticate requests, but the writer still has to be
+    /// configured with a key pair, and a real deployment would supply one.
+    const ACCESS_KEY: &str = "k2i-test-access-key";
+    const SECRET_KEY: &str = "k2i-test-secret-key";
+    const S3_PORT: u16 = 9090;
 
-    /// MinIO serves each top-level directory under its data dir as a bucket.
-    /// Seeding a file inside `/data/<bucket>/` therefore provisions the bucket
-    /// before startup, avoiding a dependency on an S3 admin client purely to
-    /// issue a CreateBucket call. The image entrypoint prefixes `minio` to the
-    /// command, so the command cannot be used to run a shell.
-    fn minio_image() -> testcontainers::ContainerRequest<GenericImage> {
-        GenericImage::new("minio/minio", "RELEASE.2022-02-07T08-17-33Z")
-            .with_wait_for(WaitFor::message_on_stdout("API:"))
-            .with_exposed_port(ContainerPort::Tcp(9000))
-            .with_env_var("MINIO_CONSOLE_ADDRESS", ":9001")
-            .with_env_var("MINIO_ROOT_USER", ACCESS_KEY)
-            .with_env_var("MINIO_ROOT_PASSWORD", SECRET_KEY)
-            .with_copy_to(format!("/data/{BUCKET}/.keep"), Vec::<u8>::new())
-            .with_cmd(vec!["server".to_string(), "/data".to_string()])
+    /// Adobe S3Mock, pinned: a purpose-built S3 server with a small image and a
+    /// ~2s boot. It is used instead of MinIO (whose images were withdrawn from
+    /// Docker Hub) and instead of LocalStack (whose current images refuse to
+    /// start without an account auth token).
+    ///
+    /// S3Mock does not treat directories under a data dir as buckets, so the
+    /// bucket is provisioned by the server at startup via
+    /// `...STORE_INITIAL_BUCKETS`, which issues the S3 CreateBucket before the
+    /// first write; no admin client is needed. `adobe/s3mock:5.2.3` supports
+    /// path-style addressing, multipart uploads, and real 404s for missing keys
+    /// — the API surface these tests exercise.
+    fn s3_server() -> testcontainers::ContainerRequest<GenericImage> {
+        GenericImage::new("adobe/s3mock", "5.2.3")
+            .with_wait_for(WaitFor::message_on_stdout("Started S3MockApplication"))
+            .with_exposed_port(ContainerPort::Tcp(S3_PORT))
+            .with_env_var("COM_ADOBE_TESTING_S3MOCK_STORE_INITIAL_BUCKETS", BUCKET)
+            .with_env_var("COM_ADOBE_TESTING_S3MOCK_STORE_REGION", REGION)
+    }
+
+    /// Starts S3Mock and returns its endpoint. The container handle must be
+    /// kept alive by the caller, since dropping it stops the server.
+    async fn start_s3_server() -> (testcontainers::ContainerAsync<GenericImage>, String) {
+        let container = s3_server().start().await.expect("failed to start S3Mock");
+        let port = container
+            .get_host_port_ipv4(S3_PORT)
+            .await
+            .expect("failed to get S3Mock port");
+        (container, format!("http://127.0.0.1:{port}"))
     }
 
     fn s3_config(warehouse_path: &str, endpoint: &str) -> IcebergConfig {
@@ -724,7 +742,7 @@ mod s3_object_store_integration {
             partition_spec: vec![],
             rest_uri: None,
             hive_metastore_uri: None,
-            aws_region: Some("us-east-1".to_string()),
+            aws_region: Some(REGION.to_string()),
             aws_access_key_id: Some(ACCESS_KEY.into()),
             aws_secret_access_key: Some(SECRET_KEY.into()),
             s3_endpoint: Some(endpoint.to_string()),
@@ -782,12 +800,7 @@ mod s3_object_store_integration {
     #[tokio::test]
     #[ignore = "requires Docker"]
     async fn test_s3_prefixed_warehouse_file_lands_where_catalog_points() {
-        let container = minio_image().start().await.expect("failed to start MinIO");
-        let port = container
-            .get_host_port_ipv4(9000)
-            .await
-            .expect("failed to get MinIO port");
-        let endpoint = format!("http://127.0.0.1:{port}");
+        let (_container, endpoint) = start_s3_server().await;
 
         // The interesting case: a warehouse with an in-bucket prefix.
         let warehouse = format!("s3://{BUCKET}/warehouse");
@@ -798,7 +811,7 @@ mod s3_object_store_integration {
         let stats = writer
             .write_batch(test_batch(), 102)
             .await
-            .expect("write_batch against MinIO should succeed");
+            .expect("write_batch against S3Mock should succeed");
 
         // 1. The reported path is warehouse-relative — it must NOT already
         //    contain the in-bucket prefix, or consumers that join it against
@@ -852,12 +865,7 @@ mod s3_object_store_integration {
     #[tokio::test]
     #[ignore = "requires Docker"]
     async fn test_s3_bucket_root_warehouse_writes_at_bucket_root() {
-        let container = minio_image().start().await.expect("failed to start MinIO");
-        let port = container
-            .get_host_port_ipv4(9000)
-            .await
-            .expect("failed to get MinIO port");
-        let endpoint = format!("http://127.0.0.1:{port}");
+        let (_container, endpoint) = start_s3_server().await;
 
         let warehouse = format!("s3://{BUCKET}");
         let writer = IcebergWriter::new(s3_config(&warehouse, &endpoint))
@@ -867,7 +875,7 @@ mod s3_object_store_integration {
         let stats = writer
             .write_batch(test_batch(), 102)
             .await
-            .expect("write_batch against MinIO should succeed");
+            .expect("write_batch against S3Mock should succeed");
 
         let store = bucket_rooted_store(&endpoint);
         let key = ObjectPath::from(stats.file_path.clone());
@@ -885,12 +893,7 @@ mod s3_object_store_integration {
     #[tokio::test]
     #[ignore = "requires Docker"]
     async fn test_s3_multi_segment_warehouse_prefix_is_preserved() {
-        let container = minio_image().start().await.expect("failed to start MinIO");
-        let port = container
-            .get_host_port_ipv4(9000)
-            .await
-            .expect("failed to get MinIO port");
-        let endpoint = format!("http://127.0.0.1:{port}");
+        let (_container, endpoint) = start_s3_server().await;
 
         let warehouse = format!("s3://{BUCKET}/warehouse/prod");
         let writer = IcebergWriter::new(s3_config(&warehouse, &endpoint))
@@ -900,7 +903,7 @@ mod s3_object_store_integration {
         let stats = writer
             .write_batch(test_batch(), 102)
             .await
-            .expect("write_batch against MinIO should succeed");
+            .expect("write_batch against S3Mock should succeed");
 
         let store = bucket_rooted_store(&endpoint);
         let expected_key = ObjectPath::from(format!("warehouse/prod/{}", stats.file_path));
