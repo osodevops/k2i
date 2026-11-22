@@ -287,6 +287,14 @@ async fn metrics_handler(State(state): State<Arc<ServerState>>) -> impl IntoResp
 mod tests {
     use super::*;
 
+    fn test_state() -> Arc<ServerState> {
+        Arc::new(ServerState {
+            health: Arc::new(HealthCheck::new()),
+            metrics: Arc::new(IngestionMetrics::new()),
+        })
+    }
+
+    #[tokio::test]
     async fn probe_routes_report_state_over_http() {
         use axum::body::Body;
         use axum::http::Request;
@@ -340,6 +348,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn healthz_stays_ok_when_component_is_unhealthy() {
+        let state = test_state();
+        state.health.register_component("kafka");
+        state
+            .health
+            .mark_unhealthy("kafka", "initialization timed out");
+
+        let response = healthz_handler(State(state)).await.into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
     #[tokio::test]
     async fn startupz_unavailable_before_engine_start() {
         let state = test_state();
