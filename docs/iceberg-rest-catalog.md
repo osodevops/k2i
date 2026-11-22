@@ -61,7 +61,7 @@ K2I_E2E_LOAD_MESSAGES=100000 scripts/e2e-docker-iceberg-load.sh
 ## Storage Backends
 
 The writer is wired for local filesystem, S3-compatible, GCS, and Azure Blob
-warehouses. S3 is validated by a MinIO container round trip in the test suite;
+warehouses. S3 is validated by an Adobe S3Mock container round trip in the test suite;
 the Docker E2E flows use local warehouse volumes and S3-compatible
 configuration. GCS and Azure are validated at configuration and store-construction
 level only — no live bucket or account is exercised — so validate credentials

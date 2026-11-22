@@ -57,6 +57,6 @@ K2I is production-oriented, but the docs intentionally keep caveats visible:
 - hot reads are local read-state RPC, while query engines see data after an Iceberg commit;
 - exactly-once-style durability is designed around manual Kafka offsets, transaction-log records, idempotency records, immutable Parquet writes, and atomic Iceberg commits;
 - multi-partition hardening, startup recovery application, async Kafka commit acknowledgement, per-entry fsync behavior, and maintenance scheduler wiring remain production follow-ups;
-- S3, GCS, and Azure object stores are wired end to end; S3 is covered by a MinIO container round trip, while GCS and Azure are covered at the configuration and store-construction level only, so validate their credentials before rollout.
+- S3, GCS, and Azure object stores are wired end to end; S3 is covered by an Adobe S3Mock container round trip, while GCS and Azure are covered at the configuration and store-construction level only, so validate their credentials before rollout.
 
 See [Production Readiness](./production-readiness.md) before broad rollout.

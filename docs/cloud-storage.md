@@ -22,7 +22,7 @@ table before claiming a backend is validated in your environment.
 
 | Backend | Covered by an automated test | Not covered by any test |
 |---|---|---|
-| S3 / S3-compatible | MinIO container round trip: the writer uploads a Parquet file, the catalog-visible URI resolves to the stored object with the expected size, and no object appears at a doubled or missing prefix. Store construction with no explicit keys. | IRSA, EC2 instance profiles, ECS task roles, and environment credentials are not exercised: they need real AWS credentials and are not simulated. |
+| S3 / S3-compatible | Adobe S3Mock container round trip: the writer uploads a Parquet file, the catalog-visible URI resolves to the stored object with the expected size, and no object appears at a doubled or missing prefix. Store construction with no explicit keys. | IRSA, EC2 instance profiles, ECS task roles, and environment credentials are not exercised: they need real AWS credentials and are not simulated. |
 | GCS | Store construction with no explicit credentials; bucket/prefix unit tests. | No live GCS bucket, no Workload Identity, no ADC exchange. |
 | Azure Blob | Store construction with no explicit credentials; container/prefix unit tests; missing-account error. | No live Azure account, no Managed Identity, no Workload Identity token exchange. |
 
@@ -274,7 +274,7 @@ so K2I selects it through IMDS.
 
 | Backend | Environment |
 |---|---|
-| S3 / MinIO | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, optional `AWS_SESSION_TOKEN`, `AWS_REGION`, and `s3_endpoint` in config or `AWS_ENDPOINT_URL` |
+| S3 / S3-compatible (MinIO, S3Mock) | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, optional `AWS_SESSION_TOKEN`, `AWS_REGION`, and `s3_endpoint` in config or `AWS_ENDPOINT_URL` |
 | GCS | `GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json`, or `gcloud auth application-default login` |
 | Azure | `AZURE_STORAGE_ACCOUNT_KEY`, or `az login` plus `AZURE_USE_AZURE_CLI=true` |
 
