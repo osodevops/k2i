@@ -15,6 +15,7 @@ The implemented path now covers:
 - Optional Unix socket read-state RPC returning committed Parquet files plus hot Arrow IPC rows.
 - Real Iceberg REST metadata commits through iceberg-rust, validated with DuckDB `iceberg_scan`.
 - Docker E2E correctness, local load, Iceberg metadata, and Iceberg load harnesses with Kafka, Schema Registry, K2I, DuckDB, and the Rust E2E runner.
+- Documented on-disk persistence requirements: required and ephemeral paths, default locations, loss impact, and a PVC-based deployment example. See [Deploying K2I on Kubernetes](./kubernetes.md#state-persistence).
 
 The code has been verified locally, but the production gaps below should be tracked before calling the whole system production complete.
 
@@ -80,6 +81,8 @@ Latest local verification for the implementation:
 | `scripts/e2e-docker-iceberg.sh` | Pass |
 | `K2I_E2E_LOAD_MESSAGES=100000 scripts/e2e-docker-iceberg-load.sh` | Pass |
 | Docs claim scan and `git diff --check` | Pass for release docs after content PR |
+| Persistence paths/defaults checked against `config.rs` and `config/example.toml` | Pass |
+| Kubernetes volume table and PVC example YAML parse | Pass |
 
 Docker correctness flow verified:
 
@@ -119,6 +122,46 @@ Docker Iceberg load flow:
 - Schema Registry responses are cached in memory and on disk. The disk cache is a stale fallback, not a replacement for Schema Registry availability.
 - Read RPC is local Unix socket only. It is intended for co-located readers, sidecars, or local adapters, not direct remote exposure.
 
+### Persistence and recovery
+
+The volume layout is documented in [Deploying K2I on
+Kubernetes](./kubernetes.md#state-persistence). The recovery caveats that shape
+that layout:
+
+- **The transaction log is required state.** `transaction_log.log_dir` holds
+  offset markers, flush stages, committed-file records, idempotency records,
+  checkpoints, and maintenance events. Keep it on a durable
+  `ReadWriteOnce` volume.
+- **Recovery is computed, not fully applied.** On restart K2I replays the
+  `*.jsonl` files in `log_dir` and reports maximum offsets, the last snapshot,
+  incomplete flushes, orphan files, and committed data files. Kafka seeking and
+  deduplication from that state are not fully wired, and startup orphan cleanup
+  is not automatic. The consumer resumes from Kafka's broker-side group
+  offsets; the txlog does not choose the starting offset. If group offsets are
+  missing or expired, `kafka.auto_offset_reset` decides.
+- **Per-entry durability is not guaranteed.** Each append flushes the buffered
+  writer; fsync happens at checkpoint and rotation, not on every entry. A node
+  or power loss can lose the newest entries even when the PVC survives. A
+  successful append is not proof of power-loss durability.
+- **Kafka commits are async.** `commit_offset` uses `CommitMode::Async`; success
+  means librdkafka accepted the request, not that the broker durably recorded
+  it. After a crash, records can be replayed. Idempotency records reduce
+  duplicates, but losing the txlog removes that protection.
+- **Cold data needs its own volume when local.** If `iceberg.warehouse_path` is
+  a local path, Parquet, Iceberg metadata, and manifests must be on durable
+  storage. Losing that volume loses cold data even when the txlog survives.
+  With `s3://`, `gs://`, or `az://` warehouses, the data is outside the pod and
+  only the txlog and optional SQL catalog database need persistence.
+- **One writer per volume.** K2I is single-process. Run one pod and use
+  `ReadWriteOnce` volumes; a rolling update must stop the old pod first
+  (`strategy: Recreate`).
+- **The schema cache is disposable.** `<transaction_log.log_dir>/schema-cache`
+  only saves a Schema Registry re-fetch. Losing it is not data loss, but a
+  registry outage at startup then has no stale fallback.
+- **A SQLite SQL catalog is durable state.** With `catalog_type = "sql"` and the
+  SQLite backend, `iceberg.sql_catalog.url` stores namespace, table, snapshot,
+  and data-file rows. Back it up together with the warehouse volume.
+
 ## Production Follow-Ups
 
 Track these as explicit issues before broad production rollout:
@@ -128,4 +171,4 @@ Track these as explicit issues before broad production rollout:
 3. Decide whether `skip-message` should become a real dead-letter/skip workflow. Do not implement simple offset skipping without durable accounting.
 4. Gate the Docker load and Iceberg load profiles in CI or nightly automation. The 100,000-row runs are useful but may be too heavy for every PR.
 5. Add JSON/raw regression coverage if those formats need the same confidence level as Protobuf.
-6. Continue hardening multi-partition offset commit and recovery behavior under mixed-partition batches.
+6. Wire computed recovery state into Kafka seeking/deduplication and startup orphan cleanup, and continue hardening multi-partition offset commit and recovery behavior under mixed-partition batches.
