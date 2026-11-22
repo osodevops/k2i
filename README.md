@@ -275,6 +275,7 @@ See [Production Readiness](docs/production-readiness.md) for the detailed review
 | [Kafka to Iceberg](docs/kafka-to-iceberg.md) | Main explanation of the K2I data path |
 | [Quickstart](docs/quickstart.md) | Local proof and first manual run |
 | [Configuration](docs/configuration.md) | Complete TOML reference |
+| [Cloud Object Storage](docs/cloud-storage.md) | IRSA, GKE/AKS Workload Identity, and credential troubleshooting |
 | [Architecture](docs/architecture.md) | System design, ordering, and hot/cold reads |
 | [Comparisons](docs/comparisons.md) | K2I vs Kafka Connect, Flink, Spark, TableFlow, and Moonlink |
 | [DuckDB Iceberg Validation](docs/duckdb-iceberg-validation.md) | How local Docker E2E proves real Iceberg metadata |

@@ -108,10 +108,13 @@ rest_uri = "http://localhost:8181"
 # K2I_ICEBERG_AWS_SECRET_ACCESS_KEY=...
 #
 # When both access key fields are omitted, the SDK uses the default credential
-# chain: environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, etc.)
-# -> IMDS (EC2 instance profiles) -> IRSA (EKS IAM Roles for Service Accounts).
-# This allows EKS with IRSA, EC2 instance profiles, and local dev with env
-# vars — no explicit config needed.
+# chain: AWS_* environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
+# AWS_SESSION_TOKEN) -> web identity / IRSA (EKS IAM Roles for Service Accounts)
+# -> ECS task role -> IMDS (EC2 instance profiles). This allows EKS with IRSA,
+# EC2 instance profiles, ECS task roles, and local dev with env vars — no
+# explicit config needed. Shared ~/.aws profiles are not read.
+#
+# Cloud credential chains and k8s workload-identity setup: docs/cloud-storage.md
 
 # GCS configuration — set warehouse_path to gs://bucket/path
 #   warehouse_path = "gs://my-gcs-bucket/warehouse"
@@ -119,8 +122,10 @@ rest_uri = "http://localhost:8181"
 #   gcs_service_account_path = "/path/to/key.json"  # optional: explicit SA key
 #
 # When gcs_service_account_path is omitted, the SDK uses Application Default
-# Credentials (ADC). On GKE this means Workload Identity Federation; locally
-# it picks up GOOGLE_APPLICATION_CREDENTIALS or gcloud auth.
+# Credentials (ADC): GOOGLE_APPLICATION_CREDENTIALS or GOOGLE_SERVICE_ACCOUNT_PATH
+# (if set), then the gcloud well-known file, then the metadata server. On GKE
+# this means Workload Identity Federation. ADC files of type external_account
+# are not supported by object_store 0.11; use a service_account key file.
 
 # Azure configuration — set warehouse_path to either:
 #   az://container/path                          (simple form)
@@ -139,10 +144,12 @@ rest_uri = "http://localhost:8181"
 # environment use K2I_ICEBERG_AZURE_ACCESS_KEY, and to source it from a file use
 # the `{ file = "..." }` form — not "${VAR}".
 #
-# When azure_access_key is omitted, the SDK uses the DefaultAzureCredential
-# chain: environment variables -> Managed Identity (on AKS) -> Azure CLI.
-# This enables AKS with Workload Identity or system-assigned Managed Identity
-# without explicit keys.
+# When azure_access_key is omitted, the SDK resolves credentials from the
+# environment: workload identity (AZURE_CLIENT_ID, AZURE_TENANT_ID,
+# AZURE_FEDERATED_TOKEN_FILE, as injected by the AKS workload-identity webhook)
+# -> service principal (AZURE_CLIENT_SECRET) -> Managed Identity via IMDS.
+# Azure CLI is used only when AZURE_USE_AZURE_CLI=true. This enables AKS with
+# Workload Identity or Managed Identity without explicit keys.
 
 # Partition specification
 # [[iceberg.partition_spec]]
