@@ -285,7 +285,7 @@ the remainder of `warehouse_path` becomes an in-bucket prefix. A warehouse of
 `s3://bucket/warehouse` writes data files to `s3://bucket/warehouse/data/...`,
 matching the location the catalog records.
 
-Coverage differs by backend: S3 has a MinIO container round-trip test, while GCS
+Coverage differs by backend: S3 has an Adobe S3Mock container round-trip test, while GCS
 and Azure are exercised at store-construction and path level only. Workload
 identity setup, IAM/RBAC requirements, and troubleshooting are in
 [Cloud Object Storage](./cloud-storage.md).
