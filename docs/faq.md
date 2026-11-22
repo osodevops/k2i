@@ -71,4 +71,4 @@ K2I_E2E_LOAD_MESSAGES=100000 scripts/e2e-docker-iceberg-load.sh
 
 ## What remains to harden before broad production rollout?
 
-The key follow-ups are multi-partition commit hardening, startup recovery application, async Kafka commit acknowledgement, per-entry fsync decisions, GCS/Azure writer wiring, maintenance scheduler wiring, and CI/nightly coverage for heavy Docker load profiles.
+The key follow-ups are multi-partition commit hardening, startup recovery application, async Kafka commit acknowledgement, per-entry fsync decisions, maintenance scheduler wiring, and CI/nightly coverage for heavy Docker load profiles. S3, GCS, and Azure object stores are wired end to end; S3 has an Adobe S3Mock container round-trip test, while GCS and Azure are covered only at the configuration and store-construction level, so validate their credentials before rollout.

@@ -11,6 +11,7 @@ The current release docs are organized around the working implementation and loc
 | [Kafka to Iceberg](./kafka-to-iceberg.md) | Main explanation of the K2I data path |
 | [Quickstart](./quickstart.md) | Local Docker proof and first manual run |
 | [Configuration](./configuration.md) | Complete TOML reference |
+| [Cloud Object Storage](./cloud-storage.md) | IRSA, GKE Workload Identity, AKS Workload Identity, and credential troubleshooting |
 | [Architecture](./architecture.md) | System design, ordering, and hot/cold visibility |
 | [Comparisons](./comparisons.md) | K2I vs Kafka Connect, Flink, Spark, TableFlow, and Moonlink |
 | [FAQ](./faq.md) | Short answers for common user questions |
@@ -55,6 +56,7 @@ K2I is production-oriented, but the docs intentionally keep caveats visible:
 - REST catalog real-metadata path validated locally; Glue, Hive, and Nessie abstractions require backend-specific validation;
 - hot reads are local read-state RPC, while query engines see data after an Iceberg commit;
 - exactly-once-style durability is designed around manual Kafka offsets, transaction-log records, idempotency records, immutable Parquet writes, and atomic Iceberg commits;
-- multi-partition hardening, startup recovery application, async Kafka commit acknowledgement, per-entry fsync behavior, GCS/Azure writer wiring, and maintenance scheduler wiring remain production follow-ups.
+- multi-partition hardening, startup recovery application, async Kafka commit acknowledgement, per-entry fsync behavior, and maintenance scheduler wiring remain production follow-ups;
+- S3, GCS, and Azure object stores are wired end to end; S3 is covered by an Adobe S3Mock container round trip, while GCS and Azure are covered at the configuration and store-construction level only, so validate their credentials before rollout.
 
 See [Production Readiness](./production-readiness.md) before broad rollout.

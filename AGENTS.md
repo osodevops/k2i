@@ -275,7 +275,7 @@ Use precise current-scope language:
 - Separate hot visibility from cold Iceberg visibility. Hot reads come from local read-state RPC; query engines see cold data after Parquet writes and Iceberg catalog commits.
 - Mention DuckDB validation as local Docker E2E coverage with direct Parquet reads and DuckDB `iceberg_scan` against real Iceberg REST metadata.
 - Do not claim K2I is a stream processor, CDC tool, multi-source ETL engine, or remote read-serving API.
-- Do not claim GCS/Azure writer support as complete; configuration exists, writer creation still needs backend wiring.
+- Do not claim GCS/Azure cloud support is tested; S3 has an Adobe S3Mock round-trip test, while GCS and Azure are covered only at configuration and store-construction level.
 - Do not claim unattended maintenance is complete without reviewing scheduler wiring for the deployment.
 
 Current user-facing docs are under `docs/`. Older PRDs, competitive research, and website drafts live under `docs/archive/` and may contain superseded claims.
@@ -290,7 +290,7 @@ These caveats matter for feature planning:
 4. **Transaction log appends flush but do not fsync every entry.** `sync()` and rotation call stronger sync paths; per-entry power-loss durability is not guaranteed.
 5. **`json` format is not a full typed JSON ingest path yet.** The engine currently treats `raw` and `json` through the raw decoder.
 6. **`skip-message` schema policy pauses.** This is deliberate to avoid advancing offsets past incompatible data without durable dead-letter accounting.
-7. **GCS and Azure object-store creation are declared but not implemented in the writer.**
+7. **GCS and Azure object-store creation is wired but only construction-tested.** S3 has an Adobe S3Mock container round-trip test. GCS and Azure store construction and warehouse-prefix handling are unit tested, but no live cloud bucket or account is exercised, so validate credentials and a real flush before rollout.
 8. **Hot buffer TTL/eviction behavior should be reviewed.** TTL config exists, but active per-record eviction is not the main freshness mechanism.
 9. **Maintenance needs production wiring review.** Do not assume compaction/expiration/orphan cleanup are fully scheduled with all required catalog/object-store handles.
 

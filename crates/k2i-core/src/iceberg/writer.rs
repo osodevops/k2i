@@ -281,17 +281,26 @@ impl IcebergWriter {
 
         let warehouse_prefix = warehouse_prefix_after_bucket("s3://", &config.warehouse_path);
 
-        let mut builder = AmazonS3Builder::new().with_bucket_name(bucket);
+        // `AmazonS3Builder::new()` reads no environment variables by itself, so
+        // seed it from the standard AWS names when no keys come from config.
+        // Without this, AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN
+        // and the ECS task-role URI in the environment are silently ignored.
+        // Config values applied below always take precedence.
+        let mut builder = AmazonS3Builder::new();
+        if config.aws_access_key_id.is_none() && config.aws_secret_access_key.is_none() {
+            builder = AmazonS3Builder::from_env();
+        }
+        builder = builder.with_bucket_name(bucket);
 
         if let Some(region) = &config.aws_region {
             builder = builder.with_region(region);
         }
 
-        // When access key / secret key are omitted, AmazonS3Builder falls through
-        // to the default credential chain: environment variables → IMDS → IRSA
-        // (IAM Roles for Service Accounts). This enables EKS with IRSA,
-        // EC2 instance profiles, and local dev with env vars like AWS_ACCESS_KEY_ID
-        // without any explicit config.
+        // When no static keys are configured, the builder resolves credentials
+        // in this order (object_store 0.11): AWS_* environment credentials →
+        // web identity token (IRSA) → ECS task role → EC2 instance metadata
+        // (IMDS). This enables EKS with IRSA, EC2 instance profiles, ECS
+        // task roles, and local dev with env vars without any explicit config.
         if let Some(access_key) = &config.aws_access_key_id {
             builder = builder.with_access_key_id(access_key.expose());
         }
@@ -330,13 +339,18 @@ impl IcebergWriter {
         // changes the bucket and leaves the path structure intact.
         let warehouse_prefix = warehouse_prefix_after_bucket("gs://", &config.warehouse_path);
 
-        let mut builder = GoogleCloudStorageBuilder::new().with_bucket_name(&bucket);
+        // `GoogleCloudStorageBuilder::new()` reads no environment variables by
+        // itself. Seeding from GOOGLE_* names makes GOOGLE_APPLICATION_CREDENTIALS
+        // and GOOGLE_SERVICE_ACCOUNT_PATH(_KEY) work as documented for
+        // Application Default Credentials. Config values below take precedence.
+        let mut builder = GoogleCloudStorageBuilder::from_env().with_bucket_name(&bucket);
 
         if let Some(sa_path) = &config.gcs_service_account_path {
             builder = builder.with_service_account_path(sa_path);
         }
-        // When no service account path is set, the builder falls through to
-        // Application Default Credentials (Workload Identity on GKE, env vars locally).
+        // With no service account path, the builder reads ADC from
+        // GOOGLE_APPLICATION_CREDENTIALS, then the gcloud well-known file, then
+        // the GCE/GKE metadata server (Workload Identity Federation on GKE).
 
         let store = builder
             .build()
@@ -368,15 +382,22 @@ impl IcebergWriter {
 
         let warehouse_prefix = azure_prefix_after_container(&config.warehouse_path);
 
-        let mut builder = MicrosoftAzureBuilder::new()
+        // `MicrosoftAzureBuilder::new()` reads no environment variables by
+        // itself. Seeding from AZURE_* names makes the AKS workload-identity
+        // webhook (AZURE_CLIENT_ID, AZURE_TENANT_ID,
+        // AZURE_FEDERATED_TOKEN_FILE), service-principal variables, and
+        // AZURE_STORAGE_ACCOUNT_KEY work. Config values below take precedence.
+        let mut builder = MicrosoftAzureBuilder::from_env()
             .with_account(account_name)
             .with_container_name(&container);
 
         if let Some(access_key) = &config.azure_access_key {
             builder = builder.with_access_key(access_key.expose());
         }
-        // When no access key is set, the builder falls through to
-        // the DefaultAzureCredential chain (Managed Identity on AKS, env vars locally).
+        // With no access key, the builder resolves credentials in this order
+        // (object_store 0.11): workload identity (federated token file) →
+        // client secret → managed identity via IMDS. Azure CLI is only used
+        // when AZURE_USE_AZURE_CLI=true is set.
 
         let store = builder
             .build()

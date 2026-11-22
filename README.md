@@ -263,7 +263,7 @@ K2I is ready for a first public release as a production-oriented Kafka-to-Iceber
 - Startup recovery computes state, but Kafka seeking/deduplication and startup orphan cleanup need further wiring.
 - Kafka offset commits are async; broker durability acknowledgement is not confirmed by the current helper.
 - Transaction-log entries are flushed, but not every entry is fsynced individually.
-- S3, GCS, and Azure object stores are wired end to end. S3 is covered by a container-backed round-trip test (MinIO); GCS and Azure are covered only at the configuration and store-construction level, so validate their credentials in your own environment before rollout.
+- S3, GCS, and Azure object stores are wired end to end. S3 is covered by a container-backed round-trip test (Adobe S3Mock); GCS and Azure are covered only at the configuration and store-construction level, so validate their credentials in your own environment before rollout.
 - Maintenance commands and task implementations exist; scheduler wiring should be reviewed for each deployment.
 
 See [Production Readiness](docs/production-readiness.md) for the detailed review checklist.
@@ -275,6 +275,7 @@ See [Production Readiness](docs/production-readiness.md) for the detailed review
 | [Kafka to Iceberg](docs/kafka-to-iceberg.md) | Main explanation of the K2I data path |
 | [Quickstart](docs/quickstart.md) | Local proof and first manual run |
 | [Configuration](docs/configuration.md) | Complete TOML reference |
+| [Cloud Object Storage](docs/cloud-storage.md) | IRSA, GKE/AKS Workload Identity, and credential troubleshooting |
 | [Architecture](docs/architecture.md) | System design, ordering, and hot/cold reads |
 | [Comparisons](docs/comparisons.md) | K2I vs Kafka Connect, Flink, Spark, TableFlow, and Moonlink |
 | [DuckDB Iceberg Validation](docs/duckdb-iceberg-validation.md) | How local Docker E2E proves real Iceberg metadata |

@@ -162,7 +162,7 @@ The Iceberg flow validates that K2I commits real Iceberg REST metadata and that 
 - Multi-partition flush and offset commit behavior needs continued hardening.
 - Startup recovery state is computed, but Kafka seeking/deduplication and startup orphan cleanup need further wiring.
 - JSON is currently a raw-compatible path, not a fully typed JSON-to-Iceberg projection.
-- GCS and Azure object-store configuration is declared, but writer creation is not complete for those backends.
+- S3, GCS, and Azure object stores are wired end to end. S3 has an Adobe S3Mock container round-trip test; GCS and Azure are covered at store-construction level only, so validate their credentials before rollout. See [Cloud Object Storage](./cloud-storage.md).
 - Maintenance commands exist, but scheduler wiring should be reviewed for each deployment.
 
 See [Production Readiness](./production-readiness.md) for the complete current status.

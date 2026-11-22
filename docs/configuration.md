@@ -271,15 +271,24 @@ table. See [Injecting Secrets](#injecting-secrets).
 
 | Storage | Format | Credential fall-through when keys are omitted |
 |---------|--------|-----------------------------------------------|
-| AWS S3 / S3-compatible | `s3://bucket-name/path/` | Env vars → IMDS (EC2 instance profiles) → IRSA (EKS) |
+| AWS S3 / S3-compatible | `s3://bucket-name/path/` | `AWS_*` env credentials → web identity / IRSA (EKS) → ECS task role → IMDS (EC2 instance profiles) |
 | Local filesystem | `file:///absolute/path/` | n/a — used for local development and tests |
-| Google Cloud Storage | `gs://bucket-name/path/` | Application Default Credentials (GKE Workload Identity, `GOOGLE_APPLICATION_CREDENTIALS`, gcloud) |
-| Azure Blob Storage | `az://container/path/` or `abfs://container@account.dfs.core.windows.net/path/` | `DefaultAzureCredential` (env → Managed Identity on AKS → Azure CLI) |
+| Google Cloud Storage | `gs://bucket-name/path/` | `GOOGLE_APPLICATION_CREDENTIALS` / `GOOGLE_SERVICE_ACCOUNT_PATH` → gcloud ADC file → GCE/GKE metadata server (Workload Identity on GKE) |
+| Azure Blob Storage | `az://container/path/` or `abfs://container@account.dfs.core.windows.net/path/` | Workload Identity env vars → service principal secret → Managed Identity via IMDS (`Azure CLI` only with `AZURE_USE_AZURE_CLI=true`) |
+
+Explicit config always wins over the environment. `object_store` 0.11 does not
+read shared AWS profiles (`~/.aws`) or SSO, and its ADC reader accepts only
+`service_account` and `authorized_user` files, not `external_account`.
 
 For cloud backends the object store is rooted at the bucket or container, and
 the remainder of `warehouse_path` becomes an in-bucket prefix. A warehouse of
 `s3://bucket/warehouse` writes data files to `s3://bucket/warehouse/data/...`,
 matching the location the catalog records.
+
+Coverage differs by backend: S3 has an Adobe S3Mock container round-trip test, while GCS
+and Azure are exercised at store-construction and path level only. Workload
+identity setup, IAM/RBAC requirements, and troubleshooting are in
+[Cloud Object Storage](./cloud-storage.md).
 
 ### [[iceberg.partition_spec]]
 
