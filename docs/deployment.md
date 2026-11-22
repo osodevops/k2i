@@ -11,7 +11,7 @@ Recommended first-release deployment model:
 - run one K2I process per Kafka topic and Iceberg table;
 - persist `transaction_log.log_dir` on durable storage;
 - start with the REST catalog path if you want the same path covered by local Docker E2E;
-- use `/healthz` for liveness and `/readyz` for readiness;
+- use `/startupz` for the startup probe, `/healthz` for liveness, and `/readyz` for readiness;
 - run the Docker Iceberg E2E and load profile before promoting a build;
 - keep maintenance commands explicit until scheduler wiring is reviewed in your deployment.
 
@@ -109,7 +109,7 @@ RUN useradd -r -u 1000 k2i
 USER k2i
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
     CMD curl -f http://localhost:8080/healthz || exit 1
 
 EXPOSE 8080 9090
@@ -144,7 +144,7 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 60s
 
 volumes:
   k2i-txlog:
@@ -301,11 +301,17 @@ spec:
             limits:
               memory: "4Gi"
               cpu: "2000m"
+          startupProbe:
+            httpGet:
+              path: /startupz
+              port: health
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 60
           livenessProbe:
             httpGet:
               path: /healthz
               port: health
-            initialDelaySeconds: 10
             periodSeconds: 30
             timeoutSeconds: 5
             failureThreshold: 3
@@ -313,7 +319,6 @@ spec:
             httpGet:
               path: /readyz
               port: health
-            initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
@@ -328,6 +333,34 @@ spec:
   strategy:
     type: Recreate  # Important: only one instance should run
 ```
+
+### Health Checks
+
+K2I exposes three probe endpoints on the health port (`8080`). They answer
+different questions and should all be configured:
+
+| Probe | Path | Question | Behaviour |
+| --- | --- | --- | --- |
+| Startup | `/startupz` | Has the ingestion engine started? | `503` until the engine enters its run loop, then `200` |
+| Liveness | `/healthz` | Is the process alive and serving HTTP? | Always `200` once the server accepts connections, independent of component health |
+| Readiness | `/readyz` | Is the engine ready for ingestion? | `200` only when no component is unhealthy and no readiness blocker exists |
+
+Use the startup probe to cover the whole initialization path: transaction-log
+recovery, Kafka connection, Schema Registry, Iceberg catalog, and table
+resolution. Kubernetes disables the liveness and readiness probes until the
+startup probe succeeds, so a slow or transiently failing initialization is not
+restarted. The HTTP server only starts listening after engine construction
+finishes, so `connection refused` during that window is expected; give the
+startup probe a failure budget that covers your slowest catalog and Kafka
+startup (the defaults above allow five minutes).
+
+Keep the liveness probe pointed at `/healthz`, never at `/health` or `/readyz`:
+component failures and schema pauses are reported on those endpoints and must
+not restart the process. Schema pauses deliberately block readiness while the
+engine stays alive so an operator can act.
+
+`/health` remains the JSON endpoint for humans and dashboards; do not wire it
+into probes.
 
 ### PersistentVolumeClaim
 

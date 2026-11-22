@@ -558,6 +558,7 @@ When running `k2i ingest`, HTTP endpoints are available:
 |----------|--------|-------------|
 | `/health` | GET | Full health status (JSON) |
 | `/healthz` | GET | Kubernetes liveness probe |
+| `/startupz` | GET | Kubernetes startup probe |
 | `/readyz` | GET | Kubernetes readiness probe |
 
 #### /health Response
@@ -576,9 +577,10 @@ When running `k2i ingest`, HTTP endpoints are available:
 }
 ```
 
-#### /healthz and /readyz
+#### /startupz, /healthz, and /readyz
 
-- `/healthz` is the liveness probe. It returns `200 OK` when the process is operational (`healthy` or `degraded`) and `503 Service Unavailable` when overall health is `unhealthy`.
+- `/startupz` is the startup probe. It returns `503 Service Unavailable` until the ingestion engine enters its run loop, then `200 OK`. Kubernetes keeps the liveness and readiness probes disabled until it succeeds.
+- `/healthz` is the liveness probe. It returns `200 OK` whenever the process is alive and serving HTTP, independent of component health. Use `/health` for the component-aware status.
 - `/readyz` is the readiness probe. It returns `200 OK` only when the process is operational and there are no readiness blockers. Schema pauses from manual evolution or breaking Protobuf changes return `503 Service Unavailable` even when `/healthz` still returns `200 OK`.
 
 ### Metrics Endpoint (port 9090)

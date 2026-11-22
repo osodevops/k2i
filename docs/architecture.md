@@ -121,7 +121,7 @@ Cold-path reads happen through query engines after K2I writes Parquet and commit
 | Read registry | Track read LSNs, hot rows, in-flight flush visibility, committed files, and scan lifetimes |
 | Iceberg writer | Convert buffer snapshots to Parquet and commit append metadata through the catalog path |
 | Transaction log | Record offsets, flush stages, data files, schema events, idempotency records, and checkpoints |
-| HTTP server | Expose `/health`, `/healthz`, `/readyz`, and `/metrics` |
+| HTTP server | Expose `/health`, `/healthz`, `/startupz`, `/readyz`, and `/metrics` |
 | CLI | Validate config, run ingestion, inspect status, manage table/dev commands, generate man pages |
 
 ## Protobuf Schema Evolution
