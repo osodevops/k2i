@@ -178,6 +178,15 @@ health_port = 8080
 log_level = "info"
 log_format = "json"
 
+# Optional OpenTelemetry trace export over OTLP/gRPC.
+# Off by default: enabling it requires an OTLP collector endpoint and is the
+# only way new spans are created. JSON logs and Prometheus metrics are
+# unaffected either way. See docs/observability.md.
+[monitoring.otel]
+enabled = false
+endpoint = "http://otel-collector:4317"
+service_name = "k2i"
+
 [rpc]
 enabled = false
 socket_path = "./run/k2i.sock"

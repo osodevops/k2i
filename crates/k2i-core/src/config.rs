@@ -903,6 +903,10 @@ pub struct MonitoringConfig {
     /// Log format
     #[serde(default)]
     pub log_format: LogFormat,
+
+    /// Optional OpenTelemetry trace export. Disabled by default.
+    #[serde(default)]
+    pub otel: OtelConfig,
 }
 
 impl Default for MonitoringConfig {
@@ -912,7 +916,97 @@ impl Default for MonitoringConfig {
             health_port: default_health_port(),
             log_level: LogLevel::default(),
             log_format: LogFormat::default(),
+            otel: OtelConfig::default(),
         }
+    }
+}
+
+/// OpenTelemetry trace export configuration.
+///
+/// Opt-in: when `enabled` is false (the default) no exporter is built and the
+/// ingestion hot path creates no spans. When enabled, spans are exported over
+/// OTLP/gRPC to `endpoint` in addition to the existing JSON/text logs.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct OtelConfig {
+    /// Enable OTLP trace export. Defaults to false.
+    pub enabled: bool,
+
+    /// OTLP/gRPC collector endpoint. Required when `enabled` is true.
+    pub endpoint: String,
+
+    /// `service.name` resource attribute reported to the collector.
+    pub service_name: String,
+}
+
+impl Default for OtelConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint: default_otel_endpoint(),
+            service_name: "k2i".to_string(),
+        }
+    }
+}
+
+impl OtelConfig {
+    /// Apply `K2I_MONITORING_OTEL_*` overrides on top of TOML values.
+    ///
+    /// Exposed so the CLI can resolve the OTel settings before the tracing
+    /// subscriber is built; the same method runs from
+    /// [`Config::apply_env_overrides`].
+    pub fn apply_env_overrides(&mut self) {
+        if let Ok(value) = std::env::var("K2I_MONITORING_OTEL_ENABLED") {
+            // Unrecognized values keep the TOML value rather than silently
+            // reading as `false`.
+            match value.to_lowercase().as_str() {
+                "true" | "1" | "yes" | "on" => self.enabled = true,
+                "false" | "0" | "no" | "off" => self.enabled = false,
+                _ => tracing::warn!(
+                    variable = "K2I_MONITORING_OTEL_ENABLED",
+                    value = %value,
+                    "Ignoring invalid boolean; keeping configured value"
+                ),
+            }
+        }
+        if let Ok(value) = std::env::var("K2I_MONITORING_OTEL_ENDPOINT") {
+            self.endpoint = value;
+        }
+        if let Ok(value) = std::env::var("K2I_MONITORING_OTEL_SERVICE_NAME") {
+            self.service_name = value;
+        }
+    }
+
+    /// Validate the endpoint and service name.
+    pub fn validate(&self) -> crate::Result<()> {
+        let endpoint = self.endpoint.trim();
+        if endpoint.is_empty() {
+            if self.enabled {
+                return Err(crate::Error::Config(
+                    "monitoring.otel.endpoint is required when monitoring.otel.enabled is true"
+                        .into(),
+                ));
+            }
+        } else {
+            let parsed = url::Url::parse(endpoint).map_err(|e| {
+                crate::Error::Config(format!("monitoring.otel.endpoint is not a valid URL: {e}"))
+            })?;
+            if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+                return Err(crate::Error::Config(
+                    "monitoring.otel.endpoint must be an http:// or https:// URL with a host"
+                        .into(),
+                ));
+            }
+        }
+
+        if self.enabled && self.service_name.trim().is_empty() {
+            return Err(crate::Error::Config(
+                "monitoring.otel.service_name must not be empty when monitoring.otel.enabled is true"
+                    .into(),
+            ));
+        }
+
+        Ok(())
     }
 }
 
@@ -1082,6 +1176,9 @@ fn default_orphan_retention_days() -> u32 {
 fn default_statistics_interval() -> u64 {
     3600 // 1 hour
 }
+fn default_otel_endpoint() -> String {
+    "http://localhost:4317".to_string()
+}
 fn default_metrics_port() -> u16 {
     9090
 }
@@ -1244,6 +1341,17 @@ const KNOWN_ENV_VARS: &[&str] = &[
     "K2I_RPC_SOCKET_PATH",
 ];
 
+/// OpenTelemetry override variables.
+///
+/// Documented in `docs/observability.md` instead of the Kubernetes env table,
+/// so they are kept out of [`KNOWN_ENV_VARS`] while still suppressing the
+/// unknown-variable typo warning for them.
+const OTEL_ENV_VARS: &[&str] = &[
+    "K2I_MONITORING_OTEL_ENABLED",
+    "K2I_MONITORING_OTEL_ENDPOINT",
+    "K2I_MONITORING_OTEL_SERVICE_NAME",
+];
+
 impl Config {
     /// Load configuration from a TOML file.
     ///
@@ -1372,6 +1480,8 @@ impl Config {
                 "RPC max_frame_bytes must be greater than zero".into(),
             ));
         }
+
+        self.monitoring.otel.validate()?;
 
         if self.schema_evolution.schema_update_min_interval_seconds == 0 {
             return Err(crate::Error::Config(
@@ -1624,6 +1734,7 @@ impl Config {
                 None => warn_bad_enum("K2I_MONITORING_LOG_FORMAT", &v, &["json", "text"]),
             }
         }
+        self.monitoring.otel.apply_env_overrides();
 
         // --- RPC ---
         if let Some(v) = env_val("K2I_RPC_ENABLED") {
@@ -1648,6 +1759,7 @@ impl Config {
             let key = key.to_string_lossy();
             if key.starts_with("K2I_")
                 && !KNOWN_ENV_VARS.contains(&key.as_ref())
+                && !OTEL_ENV_VARS.contains(&key.as_ref())
                 && !RESERVED_ENV_PREFIXES
                     .iter()
                     .any(|prefix| key.starts_with(prefix))
@@ -1807,6 +1919,98 @@ mod tests {
         assert_eq!(config.health_port, 8080);
         assert_eq!(config.log_level, LogLevel::Info);
         assert_eq!(config.log_format, LogFormat::Json);
+    }
+
+    #[test]
+    fn test_default_otel_config_is_disabled() {
+        let otel = OtelConfig::default();
+        assert!(!otel.enabled);
+        assert_eq!(otel.endpoint, "http://localhost:4317");
+        assert_eq!(otel.service_name, "k2i");
+
+        let monitoring = MonitoringConfig::default();
+        assert!(!monitoring.otel.enabled);
+    }
+
+    #[test]
+    fn test_otel_config_round_trips() {
+        let otel = OtelConfig {
+            enabled: true,
+            endpoint: "http://otel-collector:4317".to_string(),
+            service_name: "k2i-prod".to_string(),
+        };
+        let text = toml::to_string(&otel).unwrap();
+        let parsed: OtelConfig = toml::from_str(&text).unwrap();
+        assert_eq!(parsed, otel);
+    }
+
+    #[test]
+    fn test_otel_config_absent_section_uses_defaults() {
+        let monitoring: MonitoringConfig = toml::from_str("metrics_port = 9091").unwrap();
+        assert!(!monitoring.otel.enabled);
+        assert_eq!(monitoring.otel, OtelConfig::default());
+
+        let parsed: OtelConfig = toml::from_str("").unwrap();
+        assert_eq!(parsed, OtelConfig::default());
+    }
+
+    #[test]
+    fn test_otel_config_parses_section() {
+        let monitoring: MonitoringConfig = toml::from_str(
+            r#"
+metrics_port = 9090
+[otel]
+enabled = true
+endpoint = "http://collector:4317"
+service_name = "ingest"
+"#,
+        )
+        .unwrap();
+        assert!(monitoring.otel.enabled);
+        assert_eq!(monitoring.otel.endpoint, "http://collector:4317");
+        assert_eq!(monitoring.otel.service_name, "ingest");
+    }
+
+    #[test]
+    fn test_otel_validate_rejects_malformed_endpoint() {
+        let otel = OtelConfig {
+            enabled: true,
+            endpoint: "otel-collector:4317".to_string(),
+            service_name: "k2i".to_string(),
+        };
+        assert!(otel.validate().is_err());
+
+        let wrong_scheme = OtelConfig {
+            endpoint: "grpc://collector:4317".to_string(),
+            ..otel
+        };
+        assert!(wrong_scheme.validate().is_err());
+    }
+
+    #[test]
+    fn test_otel_validate_requires_endpoint_when_enabled() {
+        let otel = OtelConfig {
+            enabled: true,
+            endpoint: String::new(),
+            service_name: "k2i".to_string(),
+        };
+        assert!(otel.validate().is_err());
+
+        let disabled = OtelConfig {
+            enabled: false,
+            ..otel
+        };
+        assert!(disabled.validate().is_ok());
+    }
+
+    #[test]
+    fn test_otel_validate_requires_service_name_when_enabled() {
+        let otel = OtelConfig {
+            enabled: true,
+            endpoint: "http://collector:4317".to_string(),
+            service_name: "  ".to_string(),
+        };
+        assert!(otel.validate().is_err());
     }
 
     #[test]

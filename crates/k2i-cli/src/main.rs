@@ -361,20 +361,50 @@ async fn main() {
 async fn run_cli() -> ExitCode {
     let cli = Cli::parse();
 
-    // Try to load config for log format settings (optional - falls back to JSON).
+    // Parse the config once for settings that must exist before the subscriber
+    // is built: log format plus the optional OTel exporter. Errors are ignored
+    // here and reported by `load_config` when the command needs the config.
+    let startup_config = cli
+        .config
+        .as_ref()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|content| toml::from_str::<Config>(&content).ok());
+
     // `K2I_MONITORING_LOG_FORMAT` wins over the TOML value here for the same
     // reason it does in `Config::apply_env_overrides`; checking it directly means
     // the override also applies when no config file is given, and before the
     // subscriber exists to report a bad value.
     let log_format = LogFormat::from_env()
         .or_else(|| {
-            cli.config
+            startup_config
                 .as_ref()
-                .and_then(|path| std::fs::read_to_string(path).ok())
-                .and_then(|content| toml::from_str::<Config>(&content).ok())
-                .map(|config| config.monitoring.log_format)
+                .map(|config| config.monitoring.log_format.clone())
         })
         .unwrap_or(LogFormat::Json);
+
+    let mut otel_config = startup_config
+        .as_ref()
+        .map(|config| config.monitoring.otel.clone())
+        .unwrap_or_default();
+    otel_config.apply_env_overrides();
+
+    // Build the exporter before the subscriber because a tracing layer cannot
+    // be added after `init()`. Disabled (the default) leaves this as `None`
+    // and the subscriber below is byte-for-byte the previous one.
+    let otel_guard = if otel_config.enabled {
+        match k2i_core::metrics::otel::init(&otel_config) {
+            Ok(guard) => Some(guard),
+            Err(err) => {
+                // The command re-validates the config and reports the error
+                // with the usual exit code; tracing must not take the process
+                // down first.
+                eprintln!("OpenTelemetry tracing disabled: {err}");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     // Initialize logging
     let filter = if std::env::var("RUST_LOG").is_ok() {
@@ -387,23 +417,42 @@ async fn run_cli() -> ExitCode {
         }
     };
 
-    // Configure log format based on config
+    // Configure log format based on config. The OTel layer goes directly on
+    // the registry because it is parameterised over `Registry`; the JSON/text
+    // layer and filter are unchanged.
+    let otel_layer = otel_guard.as_ref().map(|guard| guard.layer());
     match log_format {
         LogFormat::Json => {
             tracing_subscriber::registry()
+                .with(otel_layer)
                 .with(fmt::layer().json())
                 .with(filter)
                 .init();
         }
         LogFormat::Text => {
             tracing_subscriber::registry()
+                .with(otel_layer)
                 .with(fmt::layer())
                 .with(filter)
                 .init();
         }
     }
 
+    if otel_guard.is_some() {
+        tracing::info!(
+            endpoint = %otel_config.endpoint,
+            service_name = %otel_config.service_name,
+            "OpenTelemetry trace export enabled"
+        );
+    }
+
     let result = execute_command(cli).await;
+
+    // Flush buffered spans before the process exits so a graceful stop does
+    // not lose the last traces.
+    if let Some(guard) = &otel_guard {
+        guard.shutdown();
+    }
 
     match result {
         Ok(()) => ExitCode::Success,
