@@ -120,7 +120,8 @@ Important ordering invariants:
 HTTP endpoints are implemented in `crates/k2i-cli/src/server.rs`.
 
 - `/health`: JSON status and component map.
-- `/healthz`: liveness. Returns 200 for healthy or degraded, 503 for unhealthy.
+- `/healthz`: liveness. Returns 200 whenever the process is alive and serving HTTP, independent of component health.
+- `/startupz`: startup. Returns 200 once the ingestion engine is running, 503 before that.
 - `/readyz`: readiness. Returns 200 only when operational and no readiness blockers exist.
 - `/metrics`: Prometheus text.
 

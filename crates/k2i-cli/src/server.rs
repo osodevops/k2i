@@ -53,6 +53,16 @@ impl From<&ComponentStatus> for ComponentStatusResponse {
     }
 }
 
+/// Build the router serving health and probe endpoints.
+fn health_router(state: Arc<ServerState>) -> Router {
+    Router::new()
+        .route("/health", get(health_handler))
+        .route("/healthz", get(healthz_handler))
+        .route("/startupz", get(startupz_handler))
+        .route("/readyz", get(readyz_handler))
+        .with_state(state)
+}
+
 /// Start the HTTP server for health and metrics.
 pub async fn start_server(
     state: Arc<ServerState>,
@@ -61,13 +71,8 @@ pub async fn start_server(
     mut shutdown_rx: broadcast::Receiver<()>,
 ) {
     // Start health server
-    let health_state = Arc::clone(&state);
     let health_addr = SocketAddr::from(([0, 0, 0, 0], health_port));
-    let health_router = Router::new()
-        .route("/health", get(health_handler))
-        .route("/healthz", get(healthz_handler))
-        .route("/readyz", get(readyz_handler))
-        .with_state(health_state);
+    let health_router = health_router(Arc::clone(&state));
 
     let health_listener = match tokio::net::TcpListener::bind(health_addr).await {
         Ok(listener) => listener,
@@ -149,11 +154,22 @@ async fn health_handler(State(state): State<Arc<ServerState>>) -> impl IntoRespo
 }
 
 /// Kubernetes liveness probe handler.
-async fn healthz_handler(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
-    // Liveness: Is the process alive?
-    let is_alive = state.health.overall_status() != HealthStatus::Unhealthy;
+///
+/// Liveness only answers "is the process alive and serving HTTP?". It must not
+/// depend on component health: a transient Kafka, catalog, or Schema Registry
+/// failure during initialization would otherwise get the pod restarted in a
+/// loop. Component-aware status stays on `/health` and `/readyz`.
+async fn healthz_handler(State(_state): State<Arc<ServerState>>) -> impl IntoResponse {
+    StatusCode::OK
+}
 
-    if is_alive {
+/// Kubernetes startup probe handler.
+///
+/// Returns 503 until the ingestion engine has entered its run loop, then 200.
+/// Kubernetes disables the liveness and readiness probes until this one
+/// succeeds, so slow initialization cannot trip the liveness probe.
+async fn startupz_handler(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
+    if state.health.is_job_running() {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
@@ -270,6 +286,150 @@ async fn metrics_handler(State(state): State<Arc<ServerState>>) -> impl IntoResp
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_state() -> Arc<ServerState> {
+        Arc::new(ServerState {
+            health: Arc::new(HealthCheck::new()),
+            metrics: Arc::new(IngestionMetrics::new()),
+        })
+    }
+
+    #[tokio::test]
+    async fn probe_routes_report_state_over_http() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        async fn get(app: &Router, uri: &str) -> StatusCode {
+            app.clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+                .status()
+        }
+
+        let state = test_state();
+        let app = health_router(Arc::clone(&state));
+
+        assert_eq!(get(&app, "/healthz").await, StatusCode::OK);
+        assert_eq!(
+            get(&app, "/startupz").await,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        state.health.job_started();
+        state.health.register_component("kafka");
+        state.health.mark_unhealthy("kafka", "connection lost");
+
+        assert_eq!(get(&app, "/healthz").await, StatusCode::OK);
+        assert_eq!(get(&app, "/startupz").await, StatusCode::OK);
+        assert_eq!(get(&app, "/readyz").await, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(get(&app, "/health").await, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn healthz_ok_before_engine_start() {
+        let state = test_state();
+        assert!(!state.health.is_job_running());
+
+        let response = healthz_handler(State(state)).await.into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn healthz_ok_when_component_degraded() {
+        let state = test_state();
+        state.health.mark_degraded("kafka", "reconnecting");
+
+        let response = healthz_handler(State(state)).await.into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn healthz_stays_ok_when_component_is_unhealthy() {
+        let state = test_state();
+        state.health.register_component("kafka");
+        state
+            .health
+            .mark_unhealthy("kafka", "initialization timed out");
+
+        let response = healthz_handler(State(state)).await.into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn startupz_unavailable_before_engine_start() {
+        let state = test_state();
+
+        let response = startupz_handler(State(state)).await.into_response();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn startupz_ok_once_engine_started() {
+        let state = test_state();
+        state.health.job_started();
+
+        let response = startupz_handler(State(state)).await.into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn readyz_ok_when_operational() {
+        let state = test_state();
+        state.health.register_component("kafka");
+        state.health.mark_healthy("kafka");
+
+        let response = readyz_handler(State(state)).await.into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn readyz_unavailable_when_component_unhealthy() {
+        let state = test_state();
+        state.health.register_component("kafka");
+        state.health.mark_unhealthy("kafka", "connection lost");
+
+        let response = readyz_handler(State(state)).await.into_response();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn readyz_unavailable_when_readiness_blocked() {
+        let state = test_state();
+        state.health.register_component("schema");
+        state
+            .health
+            .mark_degraded("schema", "breaking schema change");
+        state
+            .health
+            .block_readiness("schema", "operator action required");
+
+        let response = readyz_handler(State(state.clone())).await.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        // Liveness must stay green while readiness is blocked.
+        let response = healthz_handler(State(state)).await.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn health_endpoint_still_reports_unhealthy_components() {
+        let state = test_state();
+        state.health.register_component("kafka");
+        state.health.mark_unhealthy("kafka", "connection lost");
+
+        let response = health_handler(State(state)).await.into_response();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
 
     #[test]
     fn test_component_status_conversion() {

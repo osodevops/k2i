@@ -121,7 +121,7 @@ Cold-path reads happen through query engines after K2I writes Parquet and commit
 | Read registry | Track read LSNs, hot rows, in-flight flush visibility, committed files, and scan lifetimes |
 | Iceberg writer | Convert buffer snapshots to Parquet and commit append metadata through the catalog path |
 | Transaction log | Record offsets, flush stages, data files, schema events, idempotency records, and checkpoints |
-| HTTP server | Expose `/health`, `/healthz`, `/readyz`, and `/metrics` |
+| HTTP server | Expose `/health`, `/healthz`, `/startupz`, `/readyz`, and `/metrics` |
 | CLI | Validate config, run ingestion, inspect status, manage table/dev commands, generate man pages |
 
 ## Protobuf Schema Evolution
@@ -169,7 +169,7 @@ See [Iceberg REST Catalog](./iceberg-rest-catalog.md).
 - Startup recovery state is computed, but Kafka seeking/deduplication and startup orphan cleanup need further wiring.
 - Kafka commits are async in the current helper.
 - Transaction-log entries are flushed, but not every entry is fsynced individually.
-- S3, GCS, and Azure object stores are wired end to end. S3 is covered by a container-backed round-trip test (MinIO); GCS and Azure are covered only at the configuration and store-construction level, so validate their credentials in your own environment before rollout.
+- S3, GCS, and Azure object stores are wired end to end. S3 is covered by a container-backed round-trip test (Adobe S3Mock); GCS and Azure are covered only at the configuration and store-construction level, so validate their credentials in your own environment before rollout.
 - Maintenance commands and task implementations exist; scheduler wiring should be reviewed for each deployment.
 
 See [Production Readiness](./production-readiness.md).
