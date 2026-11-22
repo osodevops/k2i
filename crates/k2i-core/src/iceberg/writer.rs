@@ -281,7 +281,16 @@ impl IcebergWriter {
 
         let warehouse_prefix = warehouse_prefix_after_bucket("s3://", &config.warehouse_path);
 
-        let mut builder = AmazonS3Builder::new().with_bucket_name(bucket);
+        // `AmazonS3Builder::new()` reads no environment variables by itself, so
+        // seed it from the standard AWS names when no keys come from config.
+        // Without this, AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN
+        // and the ECS task-role URI in the environment are silently ignored.
+        // Config values applied below always take precedence.
+        let mut builder = AmazonS3Builder::new();
+        if config.aws_access_key_id.is_none() && config.aws_secret_access_key.is_none() {
+            builder = AmazonS3Builder::from_env();
+        }
+        builder = builder.with_bucket_name(bucket);
 
         if let Some(region) = &config.aws_region {
             builder = builder.with_region(region);
