@@ -6294,7 +6294,7 @@ dependencies = [
  "async-trait",
  "base64",
  "bytes",
- "h2 0.4.15",
+ "h2 0.4.16",
  "http 1.4.2",
  "http-body 1.1.0",
  "http-body-util",
