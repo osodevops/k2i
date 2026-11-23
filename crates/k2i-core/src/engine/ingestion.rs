@@ -21,6 +21,7 @@ use crate::iceberg::{
 };
 use crate::kafka::{KafkaConsumerBuilder, SmartKafkaConsumer};
 use crate::maintenance::MaintenanceScheduler;
+use crate::metrics::otel;
 use crate::metrics::IngestionMetrics;
 use crate::read::{RegisterDataFile, TableReadRegistry};
 use crate::txlog::{RecoveryState, SchemaField, TransactionEntry, TransactionLog};
@@ -30,7 +31,16 @@ use arrow::record_batch::RecordBatch;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn, Instrument, Span};
+
+fn subject_strategy_name(strategy: &crate::config::ProtobufSubjectStrategy) -> &'static str {
+    use crate::config::ProtobufSubjectStrategy;
+    match strategy {
+        ProtobufSubjectStrategy::TopicName => "topic_name",
+        ProtobufSubjectStrategy::RecordName => "record_name",
+        ProtobufSubjectStrategy::TopicRecordName => "topic_record_name",
+    }
+}
 
 fn evolved_table_schema(
     existing: &TableSchema,
@@ -242,10 +252,24 @@ impl IngestionEngine {
                     config.transaction_log.log_dir.join("schema-cache"),
                 ));
                 let decoder = Arc::new(ProtobufDecoder::new(registry, protobuf_config.clone()));
+                let schema_span = if otel::enabled() && protobuf_config.latest_on_startup {
+                    let span = tracing::info_span!(
+                        "k2i.schema.resolve",
+                        subject = tracing::field::Empty,
+                        strategy = subject_strategy_name(&protobuf_config.subject_strategy),
+                    );
+                    if let Ok(subject) = decoder.subject_for_topic(&config.kafka.topic) {
+                        span.record("subject", subject);
+                    }
+                    span
+                } else {
+                    Span::none()
+                };
                 let startup_table_schema = if protobuf_config.latest_on_startup {
                     Some(
                         decoder
                             .resolve_latest_table_schema(&config.kafka.topic)
+                            .instrument(schema_span.clone())
                             .await?,
                     )
                 } else {
@@ -359,7 +383,17 @@ impl IngestionEngine {
         let catalog: Arc<dyn CatalogOperations> = registry.create(&config.iceberg).await?;
 
         // Perform initial health check
-        let health = catalog.health_check().await?;
+        let health = {
+            let health_span = if otel::enabled() {
+                tracing::info_span!(
+                    "k2i.catalog.health",
+                    catalog_type = ?config.iceberg.catalog_type,
+                )
+            } else {
+                Span::none()
+            };
+            catalog.health_check().instrument(health_span).await?
+        };
         if !health.is_healthy {
             warn!(
                 catalog_type = ?config.iceberg.catalog_type,
@@ -454,11 +488,24 @@ impl IngestionEngine {
             return Ok(());
         }
 
-        // Poll for messages
+        // Poll for messages. The span is only created when OTel is enabled;
+        // otherwise this is a `Span::none()` and the instrumented await is a
+        // no-op.
+        let poll_span = if otel::enabled() {
+            tracing::info_span!(
+                "k2i.poll",
+                topic = %self.config.kafka.topic,
+                batch_size = self.config.kafka.batch_size as i64,
+                partition_count = tracing::field::Empty,
+            )
+        } else {
+            Span::none()
+        };
         let timeout = Duration::from_millis(self.config.kafka.batch_timeout_ms);
         let messages = match self
             .consumer
             .poll_batch(self.config.kafka.batch_size, timeout)
+            .instrument(poll_span.clone())
             .await
         {
             Ok(msgs) => {
@@ -476,19 +523,63 @@ impl IngestionEngine {
             return Ok(());
         }
 
+        if otel::enabled() {
+            let mut partitions: Vec<i32> = messages.iter().map(|msg| msg.partition).collect();
+            partitions.sort_unstable();
+            partitions.dedup();
+            poll_span.record("partition_count", partitions.len() as i64);
+        }
+
+        // Correlate with producer traces before decoding: one `k2i.message`
+        // span per traced message, parented to the producer's trace. Empty
+        // (and allocation-free) when tracing or correlation is off.
+        let trace_links = if otel::correlate_kafka_trace_context() {
+            otel::correlate_messages(&messages)
+        } else {
+            Vec::new()
+        };
+
+        let decode_span = if otel::enabled() {
+            tracing::info_span!(
+                parent: &poll_span,
+                "k2i.decode",
+                format = %self.decoder.format_name(),
+                row_count = tracing::field::Empty,
+                dropped_trace_links = tracing::field::Empty,
+            )
+        } else {
+            Span::none()
+        };
+        if !trace_links.is_empty() {
+            // The batch aggregates several producers, so it links to their
+            // spans instead of nesting under one arbitrary producer.
+            let links = otel::TraceLinkSet::collect(
+                trace_links.iter().flatten(),
+                otel::MAX_SPAN_TRACE_LINKS,
+            );
+            links.attach(&decode_span);
+            decode_span.record("dropped_trace_links", links.dropped() as i64);
+        }
         let provisional_lsns = vec![0; messages.len()];
         let mut decoded = self
             .decoder
             .decode_batch(&messages, &provisional_lsns)
+            .instrument(decode_span.clone())
             .await?;
+        // No-op when the span is `Span::none()`.
+        decode_span.record("row_count", decoded.batch.num_rows() as i64);
         self.handle_schema_evolution(&decoded).await?;
         let read_lsns: Vec<u64> = messages
             .iter()
             .map(|_| self.read_registry.next_lsn())
             .collect();
         decoded.batch = with_read_lsns(decoded.batch, &read_lsns)?;
-        self.hot_buffer
-            .append_record_batch(decoded.batch, &messages, &read_lsns)?;
+        self.hot_buffer.append_record_batch_with_trace_links(
+            decoded.batch,
+            &messages,
+            &read_lsns,
+            &trace_links,
+        )?;
 
         for msg in messages {
             // Record offset in transaction log
@@ -669,14 +760,44 @@ impl IngestionEngine {
     }
 
     async fn flush_buffer(&mut self) -> Result<()> {
-        let snapshot = self.hot_buffer.take_snapshot()?;
+        let snapshot = self.hot_buffer.take_snapshot_with_traces()?;
 
-        if let Some(snapshot) = snapshot {
+        if let Some(with_traces) = snapshot {
+            let trace_links = with_traces.trace_links;
+            let snapshot = with_traces.snapshot;
             let row_count = snapshot.batch.num_rows();
+            let flush_span = if otel::enabled() {
+                tracing::info_span!(
+                    "k2i.flush",
+                    batch_id = tracing::field::Empty,
+                    row_count = row_count as i64,
+                    file_size_bytes = tracing::field::Empty,
+                    dropped_trace_links = tracing::field::Empty,
+                )
+            } else {
+                Span::none()
+            };
+            // A flush aggregates rows decoded earlier from different
+            // producers, so it links to the traces of the rows it drained
+            // instead of nesting under one of them.
+            let trace_link_set = if otel::correlate_kafka_trace_context() {
+                otel::TraceLinkSet::collect(
+                    trace_links.iter().flatten(),
+                    otel::MAX_SPAN_TRACE_LINKS,
+                )
+            } else {
+                otel::TraceLinkSet::default()
+            };
+            trace_link_set.attach(&flush_span);
+            flush_span.record("dropped_trace_links", trace_link_set.dropped() as i64);
             let start = std::time::Instant::now();
             let flush_id = self
                 .read_registry
                 .begin_flush_batch(snapshot.records.clone(), snapshot.batch.clone());
+            if let Some(flush_id) = flush_id {
+                // No-op when the span is `Span::none()`.
+                flush_span.record("batch_id", flush_id as i64);
+            }
 
             // Get the min and max offset from the batch
             let (min_offset, max_offset) = snapshot
@@ -694,10 +815,33 @@ impl IngestionEngine {
                 })
                 .unwrap_or((0, 0));
 
-            // Write to Iceberg using the configured writer
-            let write_stats = if let Some(ref mut writer) = self.iceberg_writer {
-                match writer.write_batch(snapshot.batch, max_offset).await {
+            // Write to Iceberg using the configured writer. The commit span is
+            // a child of the flush span so a trace shows the file write inside
+            // the flush that produced it.
+            let commit_span = if otel::enabled() {
+                tracing::info_span!(
+                    parent: &flush_span,
+                    "k2i.iceberg.commit",
+                    database = %self.config.iceberg.database_name,
+                    table = %self.config.iceberg.table_name,
+                    snapshot_id = tracing::field::Empty,
+                    dropped_trace_links = tracing::field::Empty,
+                )
+            } else {
+                Span::none()
+            };
+            trace_link_set.attach(&commit_span);
+            commit_span.record("dropped_trace_links", trace_link_set.dropped() as i64);
+            let write_stats = if let Some(writer) = &mut self.iceberg_writer {
+                match writer
+                    .write_batch(snapshot.batch, max_offset)
+                    .instrument(commit_span.clone())
+                    .await
+                {
                     Ok(stats) => {
+                        // No-ops when the spans are `Span::none()`.
+                        commit_span.record("snapshot_id", stats.snapshot_id);
+                        flush_span.record("file_size_bytes", stats.file_size_bytes as i64);
                         self.health.mark_healthy("iceberg");
                         if writer.has_catalog_integration() {
                             self.health.mark_healthy("catalog");
