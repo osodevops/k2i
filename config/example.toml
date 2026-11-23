@@ -186,6 +186,9 @@ log_format = "json"
 enabled = false
 endpoint = "http://otel-collector:4317"
 service_name = "k2i"
+# Link K2I's spans to the producer's W3C trace when a consumed Kafka record
+# carries a `traceparent` header. No effect while `enabled` is false.
+correlate_kafka_trace_context = true
 
 [rpc]
 enabled = false

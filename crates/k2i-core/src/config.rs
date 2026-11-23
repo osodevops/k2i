@@ -938,6 +938,14 @@ pub struct OtelConfig {
 
     /// `service.name` resource attribute reported to the collector.
     pub service_name: String,
+
+    /// Use the producer's W3C trace context from Kafka message headers.
+    ///
+    /// When true (the default) a `traceparent` header on a consumed record
+    /// parents a `k2i.message` span to the producer's trace, and the decode,
+    /// flush, and commit spans link back to it. When false the headers are
+    /// never read. Either way this only has an effect while `enabled` is true.
+    pub correlate_kafka_trace_context: bool,
 }
 
 impl Default for OtelConfig {
@@ -946,6 +954,7 @@ impl Default for OtelConfig {
             enabled: false,
             endpoint: default_otel_endpoint(),
             service_name: "k2i".to_string(),
+            correlate_kafka_trace_context: true,
         }
     }
 }
@@ -1002,6 +1011,19 @@ impl OtelConfig {
         }
         if let Ok(value) = std::env::var("K2I_MONITORING_OTEL_SERVICE_NAME") {
             self.service_name = value;
+        }
+        if let Ok(value) = std::env::var("K2I_MONITORING_OTEL_CORRELATE_KAFKA_TRACE_CONTEXT") {
+            // Unrecognized values keep the TOML value rather than silently
+            // reading as `false`.
+            match value.to_lowercase().as_str() {
+                "true" | "1" | "yes" | "on" => self.correlate_kafka_trace_context = true,
+                "false" | "0" | "no" | "off" => self.correlate_kafka_trace_context = false,
+                _ => tracing::warn!(
+                    variable = "K2I_MONITORING_OTEL_CORRELATE_KAFKA_TRACE_CONTEXT",
+                    value = %value,
+                    "Ignoring invalid boolean; keeping configured value"
+                ),
+            }
         }
     }
 
@@ -1378,6 +1400,7 @@ const OTEL_ENV_VARS: &[&str] = &[
     "K2I_MONITORING_OTEL_ENABLED",
     "K2I_MONITORING_OTEL_ENDPOINT",
     "K2I_MONITORING_OTEL_SERVICE_NAME",
+    "K2I_MONITORING_OTEL_CORRELATE_KAFKA_TRACE_CONTEXT",
 ];
 
 impl Config {
@@ -1952,6 +1975,7 @@ mod tests {
         assert!(!otel.enabled);
         assert_eq!(otel.endpoint, "http://localhost:4317");
         assert_eq!(otel.service_name, "k2i");
+        assert!(otel.correlate_kafka_trace_context);
     }
 
     #[test]
@@ -1960,10 +1984,12 @@ mod tests {
             enabled: true,
             endpoint: "http://otel-collector:4317".to_string(),
             service_name: "k2i-prod".to_string(),
+            correlate_kafka_trace_context: false,
         };
         let text = toml::to_string(&otel).unwrap();
         let parsed: OtelConfig = toml::from_str(&text).unwrap();
         assert_eq!(parsed, otel);
+        assert!(!parsed.correlate_kafka_trace_context);
     }
 
     #[test]
@@ -1992,12 +2018,14 @@ metrics_port = 9090
 enabled = true
 endpoint = "http://collector:4317"
 service_name = "ingest"
+correlate_kafka_trace_context = false
 "#,
         )
         .unwrap();
         assert!(parsed.enabled);
         assert_eq!(parsed.endpoint, "http://collector:4317");
         assert_eq!(parsed.service_name, "ingest");
+        assert!(!parsed.correlate_kafka_trace_context);
     }
 
     #[test]
@@ -2024,6 +2052,10 @@ service_name = "ingest"
         .unwrap();
         assert!(parsed.enabled);
         assert_eq!(parsed.service_name, "ingest");
+        assert!(
+            parsed.correlate_kafka_trace_context,
+            "the field defaults to on inside the section"
+        );
     }
 
     #[test]
@@ -2031,7 +2063,7 @@ service_name = "ingest"
         let otel = OtelConfig {
             enabled: true,
             endpoint: "otel-collector:4317".to_string(),
-            service_name: "k2i".to_string(),
+            ..OtelConfig::default()
         };
         assert!(otel.validate().is_err());
 
@@ -2047,7 +2079,7 @@ service_name = "ingest"
         let otel = OtelConfig {
             enabled: true,
             endpoint: String::new(),
-            service_name: "k2i".to_string(),
+            ..OtelConfig::default()
         };
         assert!(otel.validate().is_err());
 
@@ -2064,6 +2096,7 @@ service_name = "ingest"
             enabled: true,
             endpoint: "http://collector:4317".to_string(),
             service_name: "  ".to_string(),
+            ..OtelConfig::default()
         };
         assert!(otel.validate().is_err());
     }

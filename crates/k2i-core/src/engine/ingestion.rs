@@ -530,16 +530,36 @@ impl IngestionEngine {
             poll_span.record("partition_count", partitions.len() as i64);
         }
 
+        // Correlate with producer traces before decoding: one `k2i.message`
+        // span per traced message, parented to the producer's trace. Empty
+        // (and allocation-free) when tracing or correlation is off.
+        let trace_links = if otel::correlate_kafka_trace_context() {
+            otel::correlate_messages(&messages)
+        } else {
+            Vec::new()
+        };
+
         let decode_span = if otel::enabled() {
             tracing::info_span!(
                 parent: &poll_span,
                 "k2i.decode",
                 format = %self.decoder.format_name(),
                 row_count = tracing::field::Empty,
+                dropped_trace_links = tracing::field::Empty,
             )
         } else {
             Span::none()
         };
+        if !trace_links.is_empty() {
+            // The batch aggregates several producers, so it links to their
+            // spans instead of nesting under one arbitrary producer.
+            let links = otel::TraceLinkSet::collect(
+                trace_links.iter().flatten(),
+                otel::MAX_SPAN_TRACE_LINKS,
+            );
+            links.attach(&decode_span);
+            decode_span.record("dropped_trace_links", links.dropped() as i64);
+        }
         let provisional_lsns = vec![0; messages.len()];
         let mut decoded = self
             .decoder
@@ -554,8 +574,12 @@ impl IngestionEngine {
             .map(|_| self.read_registry.next_lsn())
             .collect();
         decoded.batch = with_read_lsns(decoded.batch, &read_lsns)?;
-        self.hot_buffer
-            .append_record_batch(decoded.batch, &messages, &read_lsns)?;
+        self.hot_buffer.append_record_batch_with_trace_links(
+            decoded.batch,
+            &messages,
+            &read_lsns,
+            &trace_links,
+        )?;
 
         for msg in messages {
             // Record offset in transaction log
@@ -736,9 +760,11 @@ impl IngestionEngine {
     }
 
     async fn flush_buffer(&mut self) -> Result<()> {
-        let snapshot = self.hot_buffer.take_snapshot()?;
+        let snapshot = self.hot_buffer.take_snapshot_with_traces()?;
 
-        if let Some(snapshot) = snapshot {
+        if let Some(with_traces) = snapshot {
+            let trace_links = with_traces.trace_links;
+            let snapshot = with_traces.snapshot;
             let row_count = snapshot.batch.num_rows();
             let flush_span = if otel::enabled() {
                 tracing::info_span!(
@@ -746,10 +772,24 @@ impl IngestionEngine {
                     batch_id = tracing::field::Empty,
                     row_count = row_count as i64,
                     file_size_bytes = tracing::field::Empty,
+                    dropped_trace_links = tracing::field::Empty,
                 )
             } else {
                 Span::none()
             };
+            // A flush aggregates rows decoded earlier from different
+            // producers, so it links to the traces of the rows it drained
+            // instead of nesting under one of them.
+            let trace_link_set = if otel::correlate_kafka_trace_context() {
+                otel::TraceLinkSet::collect(
+                    trace_links.iter().flatten(),
+                    otel::MAX_SPAN_TRACE_LINKS,
+                )
+            } else {
+                otel::TraceLinkSet::default()
+            };
+            trace_link_set.attach(&flush_span);
+            flush_span.record("dropped_trace_links", trace_link_set.dropped() as i64);
             let start = std::time::Instant::now();
             let flush_id = self
                 .read_registry
@@ -785,10 +825,13 @@ impl IngestionEngine {
                     database = %self.config.iceberg.database_name,
                     table = %self.config.iceberg.table_name,
                     snapshot_id = tracing::field::Empty,
+                    dropped_trace_links = tracing::field::Empty,
                 )
             } else {
                 Span::none()
             };
+            trace_link_set.attach(&commit_span);
+            commit_span.record("dropped_trace_links", trace_link_set.dropped() as i64);
             let write_stats = if let Some(writer) = &mut self.iceberg_writer {
                 match writer
                     .write_batch(snapshot.batch, max_offset)

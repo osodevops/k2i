@@ -13,6 +13,7 @@
 
 use crate::config::BufferConfig;
 use crate::kafka::KafkaMessage;
+use crate::metrics::otel::TraceLink;
 use crate::{BufferError, Error, Result};
 use arrow::array::*;
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
@@ -120,6 +121,20 @@ impl HotBufferSnapshot {
     }
 }
 
+/// A destructive buffer snapshot plus the trace links of its rows.
+///
+/// `trace_links` is aligned with the snapshot's `records` when non-empty; a
+/// row that did not carry a producer trace context (or any row, when tracing
+/// is off) has no entry. The vector is empty when nothing in the snapshot was
+/// traced.
+#[derive(Debug)]
+pub struct HotBufferSnapshotWithTraces {
+    /// Arrow batch and raw records for the flush.
+    pub snapshot: HotBufferSnapshot,
+    /// Producer trace links, aligned with the snapshot's records from index 0.
+    pub trace_links: Vec<Option<TraceLink>>,
+}
+
 /// Hot buffer manager with Arrow storage and hash index.
 pub struct HotBuffer {
     /// Arrow schema for the buffer
@@ -133,6 +148,13 @@ pub struct HotBuffer {
 
     /// Raw record storage for queries (indexed by RowId)
     records: RwLock<Vec<BufferedRecord>>,
+
+    /// Producer trace links for the records, aligned by RowId.
+    ///
+    /// Kept beside `records` rather than on `BufferedRecord` so the public
+    /// record shape is unchanged, and left empty until a message actually
+    /// carries a trace context: the untraced path allocates nothing here.
+    trace_links: RwLock<Vec<Option<TraceLink>>>,
 
     /// Hash index: message key -> row id
     /// Using DashMap for lock-free concurrent access
@@ -192,6 +214,7 @@ impl HotBuffer {
             builders: RwLock::new(ColumnBuilders::new()),
             decoded_batches: RwLock::new(Vec::new()),
             records: RwLock::new(Vec::new()),
+            trace_links: RwLock::new(Vec::new()),
             key_index: DashMap::new(),
             offset_index: DashMap::new(),
             stats: BufferStats::new(),
@@ -271,7 +294,26 @@ impl HotBuffer {
         messages: &[KafkaMessage],
         read_lsns: &[u64],
     ) -> Result<Vec<RowId>> {
-        if batch.num_rows() != messages.len() || messages.len() != read_lsns.len() {
+        self.append_record_batch_with_trace_links(batch, messages, read_lsns, &[])
+    }
+
+    /// Append an already-decoded Arrow batch with the producer trace link of
+    /// each message.
+    ///
+    /// `trace_links` may be shorter than `messages`; rows without an entry are
+    /// treated as untraced. Pass an empty slice when tracing is off, which
+    /// keeps the buffer's trace storage empty and allocation-free.
+    pub fn append_record_batch_with_trace_links(
+        &self,
+        batch: RecordBatch,
+        messages: &[KafkaMessage],
+        read_lsns: &[u64],
+        trace_links: &[Option<TraceLink>],
+    ) -> Result<Vec<RowId>> {
+        if batch.num_rows() != messages.len()
+            || messages.len() != read_lsns.len()
+            || trace_links.len() > messages.len()
+        {
             return Err(Error::Buffer(BufferError::SchemaMismatch {
                 expected: format!(
                     "{} batch rows, {} messages, {} read LSNs",
@@ -280,10 +322,11 @@ impl HotBuffer {
                     batch.num_rows()
                 ),
                 actual: format!(
-                    "{} batch rows, {} messages, {} read LSNs",
+                    "{} batch rows, {} messages, {} read LSNs, {} trace links",
                     batch.num_rows(),
                     messages.len(),
-                    read_lsns.len()
+                    read_lsns.len(),
+                    trace_links.len()
                 ),
             }));
         }
@@ -308,8 +351,10 @@ impl HotBuffer {
         }
 
         let mut row_ids = Vec::with_capacity(messages.len());
+        let first_row;
         {
             let mut records = self.records.write();
+            first_row = records.len();
             for (msg, read_lsn) in messages.iter().zip(read_lsns) {
                 let row_id = RowId(records.len());
                 records.push(BufferedRecord::from_message(msg, *read_lsn));
@@ -329,11 +374,35 @@ impl HotBuffer {
             }
         }
 
+        self.store_trace_links(first_row, trace_links);
+
         self.decoded_memory_bytes
             .fetch_add(batch_memory, Ordering::Relaxed);
         self.decoded_batches.write().push(batch);
 
         Ok(row_ids)
+    }
+
+    /// Store trace links beside the record list, padded to `first_row`.
+    fn store_trace_links(&self, first_row: usize, trace_links: &[Option<TraceLink>]) {
+        if trace_links.is_empty() {
+            return;
+        }
+        let mut links = self.trace_links.write();
+        if links.is_empty() && trace_links.iter().all(Option::is_none) {
+            // Nothing traced yet: leave the vector empty so an untraced
+            // deployment never grows it.
+            return;
+        }
+        if links.len() < first_row {
+            links.resize(first_row, None);
+        }
+        links.extend_from_slice(trace_links);
+    }
+
+    /// Take the accumulated trace links, leaving the vector empty.
+    fn take_trace_links(&self) -> Vec<Option<TraceLink>> {
+        std::mem::take(&mut *self.trace_links.write())
     }
 
     /// Look up by message key (O(1)).
@@ -526,6 +595,21 @@ impl HotBuffer {
     /// Take a snapshot of the buffer as RecordBatch (for flushing).
     /// This clears the buffer and returns the data.
     pub fn take_snapshot(&self) -> Result<Option<HotBufferSnapshot>> {
+        Ok(self
+            .take_snapshot_with_traces()?
+            .map(|snapshot| snapshot.snapshot))
+    }
+
+    /// Take a destructive snapshot together with the producer trace links of
+    /// its rows, for linking a flush span back to the traces it drained.
+    ///
+    /// This clears the buffer, including its trace links, exactly like
+    /// [`HotBuffer::take_snapshot`].
+    pub fn take_snapshot_with_traces(&self) -> Result<Option<HotBufferSnapshotWithTraces>> {
+        self.take_snapshot_inner()
+    }
+
+    fn take_snapshot_inner(&self) -> Result<Option<HotBufferSnapshotWithTraces>> {
         if !self.decoded_batches.read().is_empty() {
             let mut decoded_batches = self.decoded_batches.write();
             if decoded_batches.is_empty() {
@@ -543,13 +627,17 @@ impl HotBuffer {
             drop(decoded_batches);
 
             self.records.write().clear();
+            let trace_links = self.take_trace_links();
             self.key_index.clear();
             self.offset_index.clear();
             self.stats.flushes.fetch_add(1, Ordering::Relaxed);
 
             info!(rows = %row_count, "Decoded hot buffer snapshot taken");
 
-            return Ok(Some(HotBufferSnapshot { batch, records }));
+            return Ok(Some(HotBufferSnapshotWithTraces {
+                snapshot: HotBufferSnapshot { batch, records },
+                trace_links,
+            }));
         }
 
         let mut builders = self.builders.write();
@@ -590,8 +678,9 @@ impl HotBuffer {
 
         drop(builders);
 
-        // Clear records storage
+        // Clear records storage and trace links
         self.records.write().clear();
+        let trace_links = self.take_trace_links();
 
         // Clear indexes
         self.key_index.clear();
@@ -602,7 +691,10 @@ impl HotBuffer {
 
         info!(rows = %row_count, "Hot buffer snapshot taken");
 
-        Ok(Some(HotBufferSnapshot { batch, records }))
+        Ok(Some(HotBufferSnapshotWithTraces {
+            snapshot: HotBufferSnapshot { batch, records },
+            trace_links,
+        }))
     }
 
     /// Clone records currently visible to readers without modifying the buffer.
@@ -832,6 +924,7 @@ pub struct HotBufferStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opentelemetry::trace::{SpanContext, SpanId, TraceFlags, TraceId, TraceState};
 
     fn create_test_buffer() -> HotBuffer {
         let config = BufferConfig {
@@ -854,6 +947,50 @@ mod tests {
             timestamp: 1234567890,
             headers: vec![],
         }
+    }
+
+    fn decoded_batch(
+        buffer: &HotBuffer,
+        messages: &[KafkaMessage],
+        read_lsns: &[u64],
+    ) -> RecordBatch {
+        let schema = buffer.schema.read().clone();
+        let keys = BinaryArray::from_iter(messages.iter().map(|m| m.key.clone()));
+        let values = BinaryArray::from_iter(messages.iter().map(|m| m.value.clone()));
+        let topics = StringArray::from(
+            messages
+                .iter()
+                .map(|m| m.topic.as_str())
+                .collect::<Vec<_>>(),
+        );
+        let partitions = Int32Array::from(messages.iter().map(|m| m.partition).collect::<Vec<_>>());
+        let offsets = Int64Array::from(messages.iter().map(|m| m.offset).collect::<Vec<_>>());
+        let timestamps = Int64Array::from(messages.iter().map(|m| m.timestamp).collect::<Vec<_>>());
+        let lsns = UInt64Array::from(read_lsns.to_vec());
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(keys),
+                Arc::new(values),
+                Arc::new(topics),
+                Arc::new(partitions),
+                Arc::new(offsets),
+                Arc::new(timestamps),
+                Arc::new(lsns),
+            ],
+        )
+        .expect("test batch")
+    }
+
+    fn trace_link(trace_byte: u8, span_id: u64) -> TraceLink {
+        let context = SpanContext::new(
+            TraceId::from_bytes([trace_byte; 16]),
+            SpanId::from(span_id),
+            TraceFlags::SAMPLED,
+            true,
+            TraceState::default(),
+        );
+        TraceLink::from_span_context(&context).expect("valid test span context")
     }
 
     #[test]
@@ -911,6 +1048,71 @@ mod tests {
         let buffer = create_test_buffer();
         let batch = buffer.take_snapshot().unwrap();
         assert!(batch.is_none());
+    }
+
+    #[test]
+    fn test_trace_links_follow_rows_into_snapshot() {
+        let buffer = create_test_buffer();
+
+        // First batch has no producer contexts: nothing is stored.
+        let first = vec![create_test_message(0), create_test_message(1)];
+        let batch = decoded_batch(&buffer, &first, &[1, 2]);
+        buffer.append_record_batch(batch, &first, &[1, 2]).unwrap();
+        assert!(
+            buffer.trace_links.read().is_empty(),
+            "untraced batches must not allocate trace storage"
+        );
+
+        // Second batch is traced at its second row; earlier rows stay untraced.
+        let second = vec![create_test_message(2), create_test_message(3)];
+        let batch = decoded_batch(&buffer, &second, &[3, 4]);
+        let link = trace_link(7, 0x2a);
+        buffer
+            .append_record_batch_with_trace_links(batch, &second, &[3, 4], &[None, Some(link)])
+            .unwrap();
+
+        let stored = buffer.trace_links.read();
+        assert_eq!(stored.len(), 4);
+        assert_eq!(
+            stored[..3],
+            [None, None, None],
+            "rows from untraced batches and untraced messages stay empty"
+        );
+        assert_eq!(stored[3], Some(link));
+        drop(stored);
+
+        let snapshot = buffer
+            .take_snapshot_with_traces()
+            .unwrap()
+            .expect("rows were buffered");
+        assert_eq!(snapshot.snapshot.records.len(), 4);
+        assert_eq!(snapshot.trace_links.len(), 4);
+        assert_eq!(snapshot.trace_links[3], Some(link));
+        assert_eq!(snapshot.trace_links[0], None);
+
+        assert!(
+            buffer.trace_links.read().is_empty(),
+            "snapshot clears trace storage"
+        );
+        assert!(buffer.take_snapshot().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_plain_snapshot_discards_trace_links() {
+        let buffer = create_test_buffer();
+        let messages = vec![create_test_message(0), create_test_message(1)];
+        let batch = decoded_batch(&buffer, &messages, &[1, 2]);
+        let link = trace_link(9, 0x2a);
+        buffer
+            .append_record_batch_with_trace_links(batch, &messages, &[1, 2], &[Some(link), None])
+            .unwrap();
+
+        let snapshot = buffer.take_snapshot().unwrap().expect("rows were buffered");
+        assert_eq!(snapshot.records.len(), 2);
+        assert!(
+            buffer.trace_links.read().is_empty(),
+            "take_snapshot must not leave stale links behind"
+        );
     }
 
     #[test]
